@@ -1,0 +1,65 @@
+{
+  "name": "github-docker-accel",
+  "description": "GitHub 和 Docker 资源加速代理服务 - 腾讯 Edge One Pages 版本",
+  "version": "1.0.0",
+  "framework": "static",
+  "buildCommand": "",
+  "outputDirectory": "static",
+  "installCommand": "",
+  "devCommand": "",
+  "functions": {
+    "directory": "functions",
+    "include": ["**/*.js"],
+    "exclude": []
+  },
+  "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/functions/_worker.js"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options", 
+          "value": "DENY"
+        },
+        {
+          "key": "X-XSS-Protection",
+          "value": "1; mode=block"
+        }
+      ]
+    },
+    {
+      "source": "/static/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=86400"
+        }
+      ]
+    }
+  ],
+  "redirects": [],
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/functions/_worker.js"
+    }
+  ],
+  "environment": {
+    "NODE_ENV": "production"
+  },
+  "regions": ["all"],
+  "runtime": "edge"
+}

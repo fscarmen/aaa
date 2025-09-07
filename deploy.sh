@@ -31,7 +31,11 @@ echo "📁 创建部署目录: $DEPLOY_DIR"
 # 复制文件到部署目录
 cp -r functions "$DEPLOY_DIR/"
 cp edge-one.config.json "$DEPLOY_DIR/"
+cp edge-one-pages.json "$DEPLOY_DIR/"
+cp wrangler.toml "$DEPLOY_DIR/"
 cp README.md "$DEPLOY_DIR/"
+cp BUILD_CONFIG.md "$DEPLOY_DIR/"
+cp TROUBLESHOOTING.md "$DEPLOY_DIR/"
 
 if [ "$SPLIT_MODE" = true ]; then
     cp -r static "$DEPLOY_DIR/"
@@ -43,8 +47,11 @@ if [ "$SPLIT_MODE" = true ]; then
     echo "  ✅ static/index.html - 前端页面（备选）"
     echo "  ✅ functions/proxy.js - Edge Function 代理（备选）"
 fi
-echo "  ✅ edge-one.config.json - 配置文件"
-echo "  ✅ README.md - 部署说明"
+echo "  ✅ edge-one-pages.json - Edge One Pages 配置"
+echo "  ✅ wrangler.toml - 兼容配置文件"
+echo "  ✅ BUILD_CONFIG.md - 构建配置指南"
+echo "  ✅ TROUBLESHOOTING.md - 问题排查指南"
+echo "  ✅ README.md - 详细说明文档"
 
 # 创建压缩包
 if command -v zip &> /dev/null; then

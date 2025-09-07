@@ -1,0 +1,36 @@
+# 腾讯 Edge One Pages 配置文件
+# 类似于 Cloudflare Pages 的 wrangler.toml 格式
+
+name = "github-docker-accel"
+compatibility_date = "2024-09-07"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+name = "github-docker-accel-prod"
+
+[env.preview]
+name = "github-docker-accel-preview"
+
+# Pages 项目配置
+[pages]
+# 构建配置
+build_command = ""
+build_output_dir = ""
+# 静态文件目录
+public_dir = "static"
+
+# Functions 配置
+[pages.functions]
+# 兼容性设置
+compatibility_date = "2024-09-07"
+compatibility_flags = ["nodejs_compat"]
+
+# 环境变量
+[pages.env_vars]
+NODE_ENV = "production"
+
+# 路由配置
+[[pages.routes]]
+pattern = "/*"
+function = "_worker"
+exclude = ["/static/*"]
