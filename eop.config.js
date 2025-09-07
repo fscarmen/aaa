@@ -5,6 +5,11 @@ module.exports = {
       src: '^/$',
       dest: '/static/index.html'
     },
+    // 调试页面路由
+    {
+      src: '^/debug.html$',
+      dest: '/static/debug.html'
+    },
     // 静态资源
     {
       src: '^/static/(.*)$',

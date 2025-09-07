@@ -33,6 +33,28 @@
    - 发布目录: `./`
 6. 点击部署
 
+## 部署后验证
+
+部署完成后，可以通过以下方式验证服务是否正常工作：
+
+1. 访问首页：
+   ```
+   curl https://your-domain.edgeone.app/
+   ```
+   应该返回 HTML 页面内容
+
+2. 测试 GitHub 文件加速：
+   ```
+   curl -I https://your-domain.edgeone.app/https://github.com/user/repo/releases/download/v1.0.0/file.zip
+   ```
+   应该返回 302 重定向或文件内容
+
+3. 测试 Docker 镜像加速：
+   ```
+   curl -I https://your-domain.edgeone.app/hello-world
+   ```
+   应该返回 Docker Registry 响应头，包含 `Docker-Distribution-API-Version: registry/2.0`
+
 ## 使用方法
 
 ### GitHub 文件加速
@@ -100,6 +122,21 @@ docker pull your-domain.edgeone.app/hello-world
 1. 确保请求路径格式正确：`https://your-domain.edgeone.app/https://github.com/...`
 2. 检查 URL 编码是否正确
 3. 确认目标文件确实存在
+
+### 查看运行日志
+
+在 EdgeOne 控制台中可以查看实时日志：
+
+1. 登录 [腾讯 EdgeOne 控制台](https://console.cloud.tencent.com/edgeone)
+2. 进入 Pages 服务
+3. 选择你的项目
+4. 点击"日志"选项卡查看实时访问日志和函数执行日志
+
+日志中会记录：
+- 请求的 URL 路径
+- 目标代理地址
+- 响应状态码
+- 错误信息
 
 ### 其他问题
 

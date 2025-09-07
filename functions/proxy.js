@@ -103,7 +103,7 @@ async function handleRequest(request, redirectCount = 0) {
   let path = url.pathname;
 
   // 记录请求信息
-  console.log(`Request: ${request.method} ${path}`);
+  console.log(`Request: ${request.method} ${path} (full URL: ${request.url})`);
 
   // 首页路由
   if (path === '/' || path === '') {
@@ -120,53 +120,61 @@ async function handleRequest(request, redirectCount = 0) {
     }
   }
 
-  // 处理 Docker V2 API 或 GitHub 代理请求
+  // 提取目标域名和路径
+  let targetDomain, targetPath, isDockerRequest = false;
+  
+  // 检查是否是 Docker V2 API 请求
   let isV2Request = false;
-  let v2RequestType = null; // 'manifests' or 'blobs'
-  let v2RequestTag = null;  // tag or digest
+  let v2RequestType = null;
+  let v2RequestTag = null;
+  
   if (path.startsWith('/v2/')) {
     isV2Request = true;
-    path = path.replace('/v2/', '');
-
-    // 解析 V2 API 请求类型和标签/摘要
+    path = path.substring(4); // 移除 /v2 前缀
+    
+    // 解析镜像名、请求类型和标签
     const pathSegments = path.split('/').filter(part => part);
     if (pathSegments.length >= 3) {
-      // 格式如: nginx/manifests/latest 或 nginx/blobs/sha256:xxx
       v2RequestType = pathSegments[pathSegments.length - 2];
       v2RequestTag = pathSegments[pathSegments.length - 1];
-      // 提取镜像名称部分（去掉 manifests/tag 或 blobs/digest 部分）
-      path = pathSegments.slice(0, pathSegments.length - 2).join('/');
+      // 提取镜像名称部分
+      const imageParts = pathSegments.slice(0, pathSegments.length - 2);
+      path = imageParts.join('/');
     }
   }
-
-  // 提取目标域名和路径
-  const pathParts = path.split('/').filter(part => part);
-  if (pathParts.length < 1) {
-    return new Response('Invalid request: target domain or path required\n', { status: 400 });
-  }
-
-  let targetDomain, targetPath, isDockerRequest = false;
-
-  // 检查路径是否以 https:// 或 http:// 开头
-  const fullPath = path.startsWith('/') ? path.substring(1) : path;
-
-  if (fullPath.startsWith('https://') || fullPath.startsWith('http://')) {
-    // 处理 /https://domain.com/... 或 /http://domain.com/... 格式
-    const urlObj = new URL(fullPath);
-    targetDomain = urlObj.hostname;
-    targetPath = urlObj.pathname.substring(1) + urlObj.search; // 移除开头的斜杠
-
-    // 检查是否为 Docker 请求
-    isDockerRequest = ['quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'].includes(targetDomain);
-
-    // 处理 docker.io 域名，转换为 registry-1.docker.io
-    if (targetDomain === 'docker.io') {
-      targetDomain = 'registry-1.docker.io';
+  
+  // 处理嵌套 URL 格式，例如 /https://github.com/...
+  if (path.startsWith('/https:/') || path.startsWith('/http:/')) {
+    try {
+      // 重构完整的 URL
+      const fullUrl = path.substring(1) + url.search; // 移除开头的斜杠
+      const targetUrl = new URL(fullUrl);
+      targetDomain = targetUrl.hostname;
+      targetPath = targetUrl.pathname.substring(1) + targetUrl.search; // 移除开头的斜杠
+      
+      // 检查是否为 Docker 请求
+      isDockerRequest = [
+        'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
+        'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
+      ].includes(targetDomain);
+      
+      // 处理 docker.io 特殊情况
+      if (targetDomain === 'docker.io') {
+        targetDomain = 'registry-1.docker.io';
+      }
+    } catch (e) {
+      console.error('Error parsing nested URL:', e);
+      return new Response('Invalid URL format\n', { status: 400 });
     }
   } else {
+    // 处理普通路径格式（Docker 镜像）
+    const pathParts = path.split('/').filter(part => part);
+    if (pathParts.length < 1) {
+      return new Response('Invalid request: target domain or path required\n', { status: 400 });
+    }
+    
     // 处理 Docker 镜像路径的多种格式
     if (pathParts[0] === 'docker.io') {
-      // 处理 docker.io/library/nginx 或 docker.io/amilys/embyserver 格式
       isDockerRequest = true;
       targetDomain = 'registry-1.docker.io';
 
@@ -181,7 +189,10 @@ async function handleRequest(request, redirectCount = 0) {
       // Docker 镜像仓库（如 ghcr.io）或 GitHub 域名（如 github.com）
       targetDomain = pathParts[0];
       targetPath = pathParts.slice(1).join('/') + url.search;
-      isDockerRequest = ['quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'].includes(targetDomain);
+      isDockerRequest = [
+        'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
+        'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
+      ].includes(targetDomain);
       
       // 处理 docker.io 特殊情况
       if (targetDomain === 'docker.io') {
@@ -382,5 +393,32 @@ async function handleRequest(request, redirectCount = 0) {
 
 export async function onRequest(context) {
   const { request } = context;
+  
+  // 检查请求路径，如果包含嵌套 URL 格式，则重写
+  const url = new URL(request.url);
+  
+  // 处理嵌套的 URL 格式，例如 /https://github.com/...
+  if (url.pathname.startsWith('/https:/') || url.pathname.startsWith('/http:/')) {
+    // 重构 URL，去掉前导斜杠
+    try {
+      // 从路径中提取目标 URL
+      const targetUrl = url.pathname.substring(1) + url.search; // 移除开头的 '/'
+      console.log(`Rewriting nested URL: ${targetUrl}`);
+      
+      // 创建新的请求对象，使用目标 URL
+      const newRequest = new Request(targetUrl, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body
+      });
+      
+      return handleRequest(newRequest);
+    } catch (e) {
+      console.error('Error rewriting nested URL:', e);
+      return new Response('Error processing request\n', { status: 500 });
+    }
+  }
+  
+  // 对于其他请求，直接处理
   return handleRequest(request);
 }
