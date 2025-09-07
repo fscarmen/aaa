@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cloudflare 加速</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%23FBBF24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M13 2L3 14h9l-1 8 10-12h-9l1-8z'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%23FBBF24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M13 2L3 14h9l-1 8 10-12h-9l1-8z'%3E%3C/path%3E%3C/svg%3E">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
@@ -241,12 +241,8 @@
     function showToast(message, isError = false) {
       const toast = document.getElementById('toast');
       toast.textContent = message;
-      toast.className = 'toast';
-      if (isError) {
-        toast.classList.add('bg-red-500');
-      } else {
-        toast.classList.add('bg-green-500');
-      }
+      toast.classList.remove(isError ? 'bg-green-500' : 'bg-red-500');
+      toast.classList.add(isError ? 'bg-red-500' : 'bg-green-500');
       toast.classList.add('show');
       setTimeout(() => {
         toast.classList.remove('show');
@@ -255,14 +251,12 @@
 
     // 复制文本的通用函数
     function copyToClipboard(text) {
-      // 尝试使用 navigator.clipboard API
       if (navigator.clipboard && window.isSecureContext) {
         return navigator.clipboard.writeText(text).catch(err => {
           console.error('Clipboard API failed:', err);
           return false;
         });
       }
-      // 后备方案：使用 document.execCommand
       const textarea = document.createElement('textarea');
       textarea.value = text;
       textarea.style.position = 'fixed';
@@ -299,7 +293,6 @@
         return;
       }
 
-      // 保持现有格式：域名/https://原始链接
       githubAcceleratedUrl = 'https://' + currentDomain + '/https://' + input.substring(8);
       result.textContent = '加速链接: ' + githubAcceleratedUrl;
       result.classList.remove('hidden');
@@ -335,8 +328,8 @@
         buttons.classList.add('hidden');
         return;
       }
-      dockerCommand = 'https://' + currentDomain + '/' + input;
-      result.textContent = '加速链接: ' + dockerCommand;
+      dockerCommand = 'docker pull ' + currentDomain + '/' + input;
+      result.textContent = '加速命令: ' + dockerCommand;
       result.classList.remove('hidden');
       buttons.classList.remove('hidden');
       copyToClipboard(dockerCommand).then(() => {
