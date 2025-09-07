@@ -21,6 +21,7 @@ const ALLOWED_HOSTS = [
   'ghcr.io',
   'docker.cloudsmith.io',
   'registry-1.docker.io',
+  'docker.io',
   'github.com',
   'api.github.com',
   'raw.githubusercontent.com',
@@ -104,6 +105,21 @@ async function handleRequest(request, redirectCount = 0) {
   // 记录请求信息
   console.log(`Request: ${request.method} ${path}`);
 
+  // 首页路由
+  if (path === '/' || path === '') {
+    // 尝试从静态文件返回首页
+    try {
+      const homepageResponse = await fetch(new URL('../static/index.html', import.meta.url));
+      return new Response(homepageResponse.body, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' }
+      });
+    } catch (error) {
+      // 如果无法获取静态文件，则返回简单响应
+      return new Response('EdgeOne Accelerator Service', { status: 200 });
+    }
+  }
+
   // 处理 Docker V2 API 或 GitHub 代理请求
   let isV2Request = false;
   let v2RequestType = null; // 'manifests' or 'blobs'
@@ -165,7 +181,12 @@ async function handleRequest(request, redirectCount = 0) {
       // Docker 镜像仓库（如 ghcr.io）或 GitHub 域名（如 github.com）
       targetDomain = pathParts[0];
       targetPath = pathParts.slice(1).join('/') + url.search;
-      isDockerRequest = ['quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io'].includes(targetDomain);
+      isDockerRequest = ['quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'].includes(targetDomain);
+      
+      // 处理 docker.io 特殊情况
+      if (targetDomain === 'docker.io') {
+        targetDomain = 'registry-1.docker.io';
+      }
     } else if (pathParts.length >= 1 && pathParts[0] === 'library') {
       // 处理 library/nginx 格式
       isDockerRequest = true;
