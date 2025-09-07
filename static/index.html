@@ -251,12 +251,14 @@
 
     // 复制文本的通用函数
     function copyToClipboard(text) {
+      // 尝试使用 navigator.clipboard API
       if (navigator.clipboard && window.isSecureContext) {
         return navigator.clipboard.writeText(text).catch(err => {
           console.error('Clipboard API failed:', err);
           return false;
         });
       }
+      // 后备方案：使用 document.execCommand
       const textarea = document.createElement('textarea');
       textarea.value = text;
       textarea.style.position = 'fixed';
@@ -293,6 +295,7 @@
         return;
       }
 
+      // 保持现有格式：域名/https://原始链接
       githubAcceleratedUrl = 'https://' + currentDomain + '/https://' + input.substring(8);
       result.textContent = '加速链接: ' + githubAcceleratedUrl;
       result.classList.remove('hidden');
