@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cloudflare 加速</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%23FBBF24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M13 2L3 14h9l-1 8 10-12h-9l1-8z'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 24 24' fill='none' stroke='%23FBBF24' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M13 2L3 14h9l-1 8 10-12h-9l1-8z'/></svg>">
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body {
@@ -87,6 +87,7 @@
     .dark-mode .result-text {
       background: #2d3748;
     }
+
     input[type="text"] {
       background-color: white !important;
       color: #111827 !important;
@@ -95,6 +96,7 @@
       background-color: #374151 !important;
       color: #e5e7eb !important;
     }
+
     @media (max-width: 640px) {
       .container {
         padding: 1rem;
@@ -207,8 +209,10 @@
   <div id="toast" class="toast"></div>
 
   <script>
+    // 动态获取当前域名
     const currentDomain = window.location.hostname;
 
+    // 主题切换
     function toggleTheme() {
       const body = document.body;
       const sun = document.querySelector('.sun');
@@ -228,46 +232,55 @@
       }
     }
 
+    // 初始化主题
     if (localStorage.getItem('theme') === 'dark') {
       toggleTheme();
     }
 
+    // 显示弹窗提示
     function showToast(message, isError = false) {
       const toast = document.getElementById('toast');
       toast.textContent = message;
       toast.className = 'toast';
-      toast.classList.add(isError ? 'bg-red-500' : 'bg-green-500');
+      if (isError) {
+        toast.classList.add('bg-red-500');
+      } else {
+        toast.classList.add('bg-green-500');
+      }
       toast.classList.add('show');
       setTimeout(() => {
         toast.classList.remove('show');
       }, 3000);
     }
 
+    // 复制文本的通用函数
     function copyToClipboard(text) {
+      // 尝试使用 navigator.clipboard API
       if (navigator.clipboard && window.isSecureContext) {
         return navigator.clipboard.writeText(text).catch(err => {
           console.error('Clipboard API failed:', err);
           return false;
         });
-      } else {
-        const textarea = document.createElement('textarea');
-        textarea.value = text;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.focus();
-        textarea.select();
-        try {
-          const successful = document.execCommand('copy');
-          document.body.removeChild(textarea);
-          return successful ? Promise.resolve() : Promise.reject(new Error('Copy command failed'));
-        } catch (err) {
-          document.body.removeChild(textarea);
-          return Promise.reject(err);
-        }
+      }
+      // 后备方案：使用 document.execCommand
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return successful ? Promise.resolve() : Promise.reject(new Error('Copy command failed'));
+      } catch (err) {
+        document.body.removeChild(textarea);
+        return Promise.reject(err);
       }
     }
 
+    // GitHub 链接转换
     let githubAcceleratedUrl = '';
     function convertGithubUrl() {
       const input = document.getElementById('github-url').value.trim();
@@ -285,6 +298,8 @@
         buttons.classList.add('hidden');
         return;
       }
+
+      // 保持现有格式：域名/https://原始链接
       githubAcceleratedUrl = 'https://' + currentDomain + '/https://' + input.substring(8);
       result.textContent = '加速链接: ' + githubAcceleratedUrl;
       result.classList.remove('hidden');
@@ -298,9 +313,9 @@
 
     function copyGithubUrl() {
       copyToClipboard(githubAcceleratedUrl).then(() => {
-        showToast('已复制到剪贴板');
+        showToast('已手动复制到剪贴板');
       }).catch(err => {
-        showToast('复制失败: ' + err.message, true);
+        showToast('手动复制失败: ' + err.message, true);
       });
     }
 
@@ -308,6 +323,7 @@
       window.open(githubAcceleratedUrl, '_blank');
     }
 
+    // Docker 镜像转换
     let dockerCommand = '';
     function convertDockerImage() {
       const input = document.getElementById('docker-image').value.trim();
@@ -319,8 +335,8 @@
         buttons.classList.add('hidden');
         return;
       }
-      dockerCommand = 'docker pull ' + currentDomain + '/' + input;
-      result.textContent = '加速命令: ' + dockerCommand;
+      dockerCommand = 'https://' + currentDomain + '/' + input;
+      result.textContent = '加速链接: ' + dockerCommand;
       result.classList.remove('hidden');
       buttons.classList.remove('hidden');
       copyToClipboard(dockerCommand).then(() => {
@@ -332,9 +348,9 @@
 
     function copyDockerCommand() {
       copyToClipboard(dockerCommand).then(() => {
-        showToast('已复制到剪贴板');
+        showToast('已手动复制到剪贴板');
       }).catch(err => {
-        showToast('复制失败: ' + err.message, true);
+        showToast('手动复制失败: ' + err.message, true);
       });
     }
   </script>
