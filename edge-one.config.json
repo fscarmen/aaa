@@ -1,0 +1,38 @@
+{
+  "name": "github-docker-accel",
+  "description": "GitHub 和 Docker 资源加速代理服务",
+  "version": "1.0.0",
+  "functions": {
+    "proxy": {
+      "path": "functions/proxy.js",
+      "routes": [
+        "/*"
+      ],
+      "excludeRoutes": [
+        "/index.html",
+        "/static/*"
+      ]
+    }
+  },
+  "static": {
+    "path": "static",
+    "routes": [
+      "/",
+      "/index.html"
+    ]
+  },
+  "environment": {
+    "NODE_ENV": "production"
+  },
+  "headers": {
+    "/*": {
+      "Cache-Control": "public, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "X-XSS-Protection": "1; mode=block"
+    },
+    "/static/*": {
+      "Cache-Control": "public, max-age=86400"
+    }
+  }
+}
