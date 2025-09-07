@@ -44,8 +44,15 @@ eo-accel/edge-one/
 
 ### 3. 上传项目文件
 
-将以下文件上传到对应目录：
+**重要提示**：腾讯 Edge One Pages 目前更适合使用单文件 Worker 模式部署。
 
+推荐使用 `functions/_worker.js` 文件，这是一个完整的单文件解决方案：
+
+```
+functions/_worker.js  -> 上传为 Edge Function（包含完整功能）
+```
+
+**备选方案**（如果支持分离部署）：
 ```
 static/index.html    -> 上传到静态文件目录
 functions/proxy.js   -> 上传到 Edge Functions 目录
@@ -53,18 +60,14 @@ functions/proxy.js   -> 上传到 Edge Functions 目录
 
 ### 4. 配置路由规则
 
-在 Edge One Pages 控制台配置以下路由规则：
-
-#### 静态文件路由
-- 路径：`/` 和 `/index.html`
-- 处理方式：静态文件服务
-- 文件：`static/index.html`
-
-#### Edge Function 路由
-- 路径：`/*`（除静态文件外的所有路径）
+#### 方案一：单文件 Worker 模式（推荐）
+- 路径：`/*`（所有路径）
 - 处理方式：Edge Function
-- 函数：`proxy.js`
-- 排除路径：`/index.html`, `/static/*`
+- 函数：`_worker.js`
+
+#### 方案二：分离模式（如果平台支持）
+- 静态文件路由：`/` 和 `/index.html` → `static/index.html`
+- Edge Function 路由：`/*`（排除静态文件）→ `functions/proxy.js`
 
 ### 5. 环境变量配置（可选）
 
