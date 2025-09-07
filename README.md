@@ -138,6 +138,20 @@ docker pull your-domain.edgeone.app/hello-world
 - 响应状态码
 - 错误信息
 
+### 常见问题
+
+#### 1. 为什么我的请求返回 404？
+
+这通常是因为 EdgeOne Pages 没有正确将请求路由到边缘函数。确保你的 [eop.config.js](eop.config.js) 配置正确，并且边缘函数已成功部署。
+
+#### 2. 为什么我的 Docker 请求返回 HTML 内容？
+
+这表示请求没有被边缘函数处理，而是被当作静态请求处理了。检查边缘函数是否正确部署，并且路由配置是否正确。
+
+#### 3. 如何验证边缘函数是否正常工作？
+
+你可以使用调试页面 `https://your-domain.edgeone.app/debug.html` 来测试各项功能是否正常。
+
 ### 其他问题
 
 1. 查看 EdgeOne 控制台中的访问日志和错误日志

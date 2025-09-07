@@ -98,301 +98,321 @@ function getEmptyBodySHA256() {
 }
 
 async function handleRequest(request, redirectCount = 0) {
-  const MAX_REDIRECTS = 5; // 最大重定向次数
-  const url = new URL(request.url);
-  let path = url.pathname;
+  try {
+    const MAX_REDIRECTS = 5; // 最大重定向次数
+    const url = new URL(request.url);
+    let path = url.pathname;
 
-  // 记录请求信息
-  console.log(`Request: ${request.method} ${path} (full URL: ${request.url})`);
+    // 记录请求信息
+    console.log(`handleRequest called with: ${request.method} ${request.url}`);
+    console.log(`Path: ${path}`);
 
-  // 首页路由
-  if (path === '/' || path === '') {
-    // 尝试从静态文件返回首页
-    try {
-      const homepageResponse = await fetch(new URL('../static/index.html', import.meta.url));
-      return new Response(homepageResponse.body, {
-        status: 200,
-        headers: { 'Content-Type': 'text/html' }
-      });
-    } catch (error) {
-      // 如果无法获取静态文件，则返回简单响应
-      return new Response('EdgeOne Accelerator Service', { status: 200 });
-    }
-  }
-
-  // 提取目标域名和路径
-  let targetDomain, targetPath, isDockerRequest = false;
-  
-  // 检查是否是 Docker V2 API 请求
-  let isV2Request = false;
-  let v2RequestType = null;
-  let v2RequestTag = null;
-  
-  if (path.startsWith('/v2/')) {
-    isV2Request = true;
-    path = path.substring(4); // 移除 /v2 前缀
-    
-    // 解析镜像名、请求类型和标签
-    const pathSegments = path.split('/').filter(part => part);
-    if (pathSegments.length >= 3) {
-      v2RequestType = pathSegments[pathSegments.length - 2];
-      v2RequestTag = pathSegments[pathSegments.length - 1];
-      // 提取镜像名称部分
-      const imageParts = pathSegments.slice(0, pathSegments.length - 2);
-      path = imageParts.join('/');
-    }
-  }
-  
-  // 处理嵌套 URL 格式，例如 /https://github.com/...
-  if (path.startsWith('/https:/') || path.startsWith('/http:/')) {
-    try {
-      // 重构完整的 URL
-      const fullUrl = path.substring(1) + url.search; // 移除开头的斜杠
-      const targetUrl = new URL(fullUrl);
-      targetDomain = targetUrl.hostname;
-      targetPath = targetUrl.pathname.substring(1) + targetUrl.search; // 移除开头的斜杠
-      
-      // 检查是否为 Docker 请求
-      isDockerRequest = [
-        'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
-        'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
-      ].includes(targetDomain);
-      
-      // 处理 docker.io 特殊情况
-      if (targetDomain === 'docker.io') {
-        targetDomain = 'registry-1.docker.io';
+    // 首页路由
+    if (path === '/' || path === '') {
+      console.log('Serving homepage');
+      // 尝试从静态文件返回首页
+      try {
+        const homepageResponse = await fetch(new URL('../static/index.html', import.meta.url));
+        return new Response(homepageResponse.body, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html' }
+        });
+      } catch (error) {
+        console.error('Error serving homepage:', error);
+        // 如果无法获取静态文件，则返回简单响应
+        return new Response('EdgeOne Accelerator Service', { status: 200 });
       }
-    } catch (e) {
-      console.error('Error parsing nested URL:', e);
-      return new Response('Invalid URL format\n', { status: 400 });
     }
-  } else {
-    // 处理普通路径格式（Docker 镜像）
-    const pathParts = path.split('/').filter(part => part);
-    if (pathParts.length < 1) {
-      return new Response('Invalid request: target domain or path required\n', { status: 400 });
+
+    // 提取目标域名和路径
+    let targetDomain, targetPath, isDockerRequest = false;
+    
+    // 检查是否是 Docker V2 API 请求
+    let isV2Request = false;
+    let v2RequestType = null;
+    let v2RequestTag = null;
+    
+    if (path.startsWith('/v2/')) {
+      isV2Request = true;
+      path = path.substring(4); // 移除 /v2 前缀
+      
+      // 解析镜像名、请求类型和标签
+      const pathSegments = path.split('/').filter(part => part);
+      if (pathSegments.length >= 3) {
+        v2RequestType = pathSegments[pathSegments.length - 2];
+        v2RequestTag = pathSegments[pathSegments.length - 1];
+        // 提取镜像名称部分
+        const imageParts = pathSegments.slice(0, pathSegments.length - 2);
+        path = imageParts.join('/');
+      }
+      console.log(`Docker V2 API request - type: ${v2RequestType}, tag: ${v2RequestTag}, path: ${path}`);
     }
     
-    // 处理 Docker 镜像路径的多种格式
-    if (pathParts[0] === 'docker.io') {
-      isDockerRequest = true;
-      targetDomain = 'registry-1.docker.io';
-
-      if (pathParts.length === 2) {
-        // 处理 docker.io/nginx 格式，添加 library 命名空间
-        targetPath = `library/${pathParts[1]}`;
-      } else {
-        // 处理 docker.io/amilys/embyserver 或 docker.io/library/nginx 格式
-        targetPath = pathParts.slice(1).join('/');
+    // 处理嵌套 URL 格式，例如 /https://github.com/...
+    if (path.startsWith('/https:/') || path.startsWith('/http:/')) {
+      try {
+        // 重构完整的 URL
+        const fullUrl = path.substring(1) + url.search; // 移除开头的斜杠
+        console.log(`Processing nested URL: ${fullUrl}`);
+        const targetUrl = new URL(fullUrl);
+        targetDomain = targetUrl.hostname;
+        targetPath = targetUrl.pathname.substring(1) + targetUrl.search; // 移除开头的斜杠
+        
+        // 检查是否为 Docker 请求
+        isDockerRequest = [
+          'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
+          'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
+        ].includes(targetDomain);
+        
+        // 处理 docker.io 特殊情况
+        if (targetDomain === 'docker.io') {
+          targetDomain = 'registry-1.docker.io';
+        }
+        console.log(`Nested URL parsed - domain: ${targetDomain}, path: ${targetPath}, isDocker: ${isDockerRequest}`);
+      } catch (e) {
+        console.error('Error parsing nested URL:', e);
+        return new Response('Invalid URL format\n', { status: 400 });
       }
-    } else if (ALLOWED_HOSTS.includes(pathParts[0])) {
-      // Docker 镜像仓库（如 ghcr.io）或 GitHub 域名（如 github.com）
-      targetDomain = pathParts[0];
-      targetPath = pathParts.slice(1).join('/') + url.search;
-      isDockerRequest = [
-        'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
-        'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
-      ].includes(targetDomain);
-      
-      // 处理 docker.io 特殊情况
-      if (targetDomain === 'docker.io') {
-        targetDomain = 'registry-1.docker.io';
-      }
-    } else if (pathParts.length >= 1 && pathParts[0] === 'library') {
-      // 处理 library/nginx 格式
-      isDockerRequest = true;
-      targetDomain = 'registry-1.docker.io';
-      targetPath = pathParts.join('/');
-    } else if (pathParts.length >= 2) {
-      // 处理 amilys/embyserver 格式（带命名空间但不是 library）
-      isDockerRequest = true;
-      targetDomain = 'registry-1.docker.io';
-      targetPath = pathParts.join('/');
     } else {
-      // 处理单个镜像名称，如 nginx
-      isDockerRequest = true;
-      targetDomain = 'registry-1.docker.io';
-      targetPath = `library/${pathParts.join('/')}`;
+      // 处理普通路径格式（Docker 镜像）
+      const pathParts = path.split('/').filter(part => part);
+      console.log(`Processing regular path: ${path}, parts:`, pathParts);
+      if (pathParts.length < 1) {
+        return new Response('Invalid request: target domain or path required\n', { status: 400 });
+      }
+      
+      // 处理 Docker 镜像路径的多种格式
+      if (pathParts[0] === 'docker.io') {
+        isDockerRequest = true;
+        targetDomain = 'registry-1.docker.io';
+
+        if (pathParts.length === 2) {
+          // 处理 docker.io/nginx 格式，添加 library 命名空间
+          targetPath = `library/${pathParts[1]}`;
+        } else {
+          // 处理 docker.io/amilys/embyserver 或 docker.io/library/nginx 格式
+          targetPath = pathParts.slice(1).join('/');
+        }
+      } else if (ALLOWED_HOSTS.includes(pathParts[0])) {
+        // Docker 镜像仓库（如 ghcr.io）或 GitHub 域名（如 github.com）
+        targetDomain = pathParts[0];
+        targetPath = pathParts.slice(1).join('/') + url.search;
+        isDockerRequest = [
+          'quay.io', 'gcr.io', 'k8s.gcr.io', 'registry.k8s.io', 
+          'ghcr.io', 'docker.cloudsmith.io', 'registry-1.docker.io', 'docker.io'
+        ].includes(targetDomain);
+        
+        // 处理 docker.io 特殊情况
+        if (targetDomain === 'docker.io') {
+          targetDomain = 'registry-1.docker.io';
+        }
+      } else if (pathParts.length >= 1 && pathParts[0] === 'library') {
+        // 处理 library/nginx 格式
+        isDockerRequest = true;
+        targetDomain = 'registry-1.docker.io';
+        targetPath = pathParts.join('/');
+      } else if (pathParts.length >= 2) {
+        // 处理 amilys/embyserver 格式（带命名空间但不是 library）
+        isDockerRequest = true;
+        targetDomain = 'registry-1.docker.io';
+        targetPath = pathParts.join('/');
+      } else {
+        // 处理单个镜像名称，如 nginx
+        isDockerRequest = true;
+        targetDomain = 'registry-1.docker.io';
+        targetPath = `library/${pathParts.join('/')}`;
+      }
     }
-  }
 
-  // 默认白名单检查：只允许 ALLOWED_HOSTS 中的域名
-  if (!ALLOWED_HOSTS.includes(targetDomain)) {
-    console.log(`Blocked: Domain ${targetDomain} not in allowed list`);
-    return new Response(`Error: Invalid target domain.\n`, { status: 400 });
-  }
-
-  // 路径白名单检查（仅当 RESTRICT_PATHS = true 时）
-  if (RESTRICT_PATHS) {
-    const checkPath = isDockerRequest ? targetPath : path;
-    console.log(`Checking whitelist against path: ${checkPath}`);
-    const isPathAllowed = ALLOWED_PATHS.some(pathString =>
-      checkPath.toLowerCase().includes(pathString.toLowerCase())
-    );
-    if (!isPathAllowed) {
-      console.log(`Blocked: Path ${checkPath} not in allowed paths`);
-      return new Response(`Error: The path is not in the allowed paths.\n`, { status: 403 });
+    // 默认白名单检查：只允许 ALLOWED_HOSTS 中的域名
+    if (!ALLOWED_HOSTS.includes(targetDomain)) {
+      console.log(`Blocked: Domain ${targetDomain} not in allowed list`);
+      return new Response(`Error: Invalid target domain.\n`, { status: 400 });
     }
-  }
 
-  // 构建目标 URL
-  let targetUrl;
-  if (isDockerRequest) {
-    if (isV2Request && v2RequestType && v2RequestTag) {
+    // 路径白名单检查（仅当 RESTRICT_PATHS = true 时）
+    if (RESTRICT_PATHS) {
+      const checkPath = isDockerRequest ? targetPath : path;
+      console.log(`Checking whitelist against path: ${checkPath}`);
+      const isPathAllowed = ALLOWED_PATHS.some(pathString =>
+        checkPath.toLowerCase().includes(pathString.toLowerCase())
+      );
+      if (!isPathAllowed) {
+        console.log(`Blocked: Path ${checkPath} not in allowed paths`);
+        return new Response(`Error: The path is not in the allowed paths.\n`, { status: 403 });
+      }
+    }
+
+    // 构建目标 URL
+    let targetUrl;
+    if (isDockerRequest && isV2Request && v2RequestType && v2RequestTag) {
       // 重构 V2 API URL
       targetUrl = `https://${targetDomain}/v2/${targetPath}/${v2RequestType}/${v2RequestTag}`;
+    } else if (isDockerRequest && isV2Request) {
+      targetUrl = `https://${targetDomain}/v2/${targetPath}`;
     } else {
-      targetUrl = `https://${targetDomain}/${isV2Request ? 'v2/' : ''}${targetPath}`;
+      targetUrl = `https://${targetDomain}/${targetPath}`;
     }
-  } else {
-    targetUrl = `https://${targetDomain}/${targetPath}`;
-  }
 
-  const newRequestHeaders = new Headers(request.headers);
-  newRequestHeaders.set('Host', targetDomain);
-  newRequestHeaders.delete('x-amz-content-sha256');
-  newRequestHeaders.delete('x-amz-date');
-  newRequestHeaders.delete('x-amz-security-token');
-  newRequestHeaders.delete('x-amz-user-agent');
+    console.log(`Proxying to: ${targetUrl}`);
 
-  if (isAmazonS3(targetUrl)) {
-    newRequestHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
-    newRequestHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
-  }
+    const newRequestHeaders = new Headers(request.headers);
+    newRequestHeaders.set('Host', targetDomain);
+    newRequestHeaders.delete('x-amz-content-sha256');
+    newRequestHeaders.delete('x-amz-date');
+    newRequestHeaders.delete('x-amz-security-token');
+    newRequestHeaders.delete('x-amz-user-agent');
 
-  try {
-    // 尝试直接请求（注意：使用 manual 重定向以便我们能拦截到 307 并自己请求 S3）
-    let response = await fetch(targetUrl, {
-      method: request.method,
-      headers: newRequestHeaders,
-      body: request.body,
-      redirect: 'manual'
-    });
-    console.log(`Initial response: ${response.status} ${response.statusText}`);
+    if (isAmazonS3(targetUrl)) {
+      newRequestHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
+      newRequestHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
+    }
 
-    // 处理 Docker 认证挑战
-    if (isDockerRequest && response.status === 401) {
-      const wwwAuth = response.headers.get('WWW-Authenticate');
-      if (wwwAuth) {
-        const authMatch = wwwAuth.match(/Bearer realm="([^"]+)",service="([^"]*)",scope="([^"]*)"/);
-        if (authMatch) {
-          const [, realm, service, scope] = authMatch;
-          console.log(`Auth challenge: realm=${realm}, service=${service || targetDomain}, scope=${scope}`);
+    try {
+      // 尝试直接请求（注意：使用 manual 重定向以便我们能拦截到 307 并自己请求 S3）
+      let response = await fetch(targetUrl, {
+        method: request.method,
+        headers: newRequestHeaders,
+        body: request.body,
+        redirect: 'manual'
+      });
+      console.log(`Initial response: ${response.status} ${response.statusText}`);
 
-          const token = await handleToken(realm, service || targetDomain, scope);
-          if (token) {
-            const authHeaders = new Headers(request.headers);
-            authHeaders.set('Authorization', `Bearer ${token}`);
-            authHeaders.set('Host', targetDomain);
-            // 如果目标是 S3，添加必要的 x-amz 头；否则删除可能干扰的头部
-            if (isAmazonS3(targetUrl)) {
-              authHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
-              authHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
+      // 处理 Docker 认证挑战
+      if (isDockerRequest && response.status === 401) {
+        const wwwAuth = response.headers.get('WWW-Authenticate');
+        if (wwwAuth) {
+          const authMatch = wwwAuth.match(/Bearer realm="([^"]+)",service="([^"]*)",scope="([^"]*)"/);
+          if (authMatch) {
+            const [, realm, service, scope] = authMatch;
+            console.log(`Auth challenge: realm=${realm}, service=${service || targetDomain}, scope=${scope}`);
+
+            const token = await handleToken(realm, service || targetDomain, scope);
+            if (token) {
+              const authHeaders = new Headers(request.headers);
+              authHeaders.set('Authorization', `Bearer ${token}`);
+              authHeaders.set('Host', targetDomain);
+              // 如果目标是 S3，添加必要的 x-amz 头；否则删除可能干扰的头部
+              if (isAmazonS3(targetUrl)) {
+                authHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
+                authHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
+              } else {
+                authHeaders.delete('x-amz-content-sha256');
+                authHeaders.delete('x-amz-date');
+                authHeaders.delete('x-amz-security-token');
+                authHeaders.delete('x-amz-user-agent');
+              }
+
+              const authRequest = new Request(targetUrl, {
+                method: request.method,
+                headers: authHeaders,
+                body: request.body,
+                redirect: 'manual'
+              });
+              console.log('Retrying with token');
+              response = await fetch(authRequest);
+              console.log(`Token response: ${response.status} ${response.statusText}`);
             } else {
-              authHeaders.delete('x-amz-content-sha256');
-              authHeaders.delete('x-amz-date');
-              authHeaders.delete('x-amz-security-token');
-              authHeaders.delete('x-amz-user-agent');
-            }
+              console.log('No token acquired, falling back to anonymous request');
+              const anonHeaders = new Headers(request.headers);
+              anonHeaders.delete('Authorization');
+              anonHeaders.set('Host', targetDomain);
+              // 如果目标是 S3，添加必要的 x-amz 头；否则删除可能干扰的头部
+              if (isAmazonS3(targetUrl)) {
+                anonHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
+                anonHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
+              } else {
+                anonHeaders.delete('x-amz-content-sha256');
+                anonHeaders.delete('x-amz-date');
+                anonHeaders.delete('x-amz-security-token');
+                anonHeaders.delete('x-amz-user-agent');
+              }
 
-            const authRequest = new Request(targetUrl, {
-              method: request.method,
-              headers: authHeaders,
-              body: request.body,
-              redirect: 'manual'
-            });
-            console.log('Retrying with token');
-            response = await fetch(authRequest);
-            console.log(`Token response: ${response.status} ${response.statusText}`);
+              const anonRequest = new Request(targetUrl, {
+                method: request.method,
+                headers: anonHeaders,
+                body: request.body,
+                redirect: 'manual'
+              });
+              response = await fetch(anonRequest);
+              console.log(`Anonymous response: ${response.status} ${response.statusText}`);
+            }
           } else {
-            console.log('No token acquired, falling back to anonymous request');
-            const anonHeaders = new Headers(request.headers);
-            anonHeaders.delete('Authorization');
-            anonHeaders.set('Host', targetDomain);
-            // 如果目标是 S3，添加必要的 x-amz 头；否则删除可能干扰的头部
-            if (isAmazonS3(targetUrl)) {
-              anonHeaders.set('x-amz-content-sha256', getEmptyBodySHA256());
-              anonHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
-            } else {
-              anonHeaders.delete('x-amz-content-sha256');
-              anonHeaders.delete('x-amz-date');
-              anonHeaders.delete('x-amz-security-token');
-              anonHeaders.delete('x-amz-user-agent');
-            }
-
-            const anonRequest = new Request(targetUrl, {
-              method: request.method,
-              headers: anonHeaders,
-              body: request.body,
-              redirect: 'manual'
-            });
-            response = await fetch(anonRequest);
-            console.log(`Anonymous response: ${response.status} ${response.statusText}`);
+            console.log('Invalid WWW-Authenticate header');
           }
         } else {
-          console.log('Invalid WWW-Authenticate header');
+          console.log('No WWW-Authenticate header in 401 response');
         }
-      } else {
-        console.log('No WWW-Authenticate header in 401 response');
       }
-    }
 
-    // 处理 S3 重定向（Docker 镜像层）
-    if (isDockerRequest && (response.status === 307 || response.status === 302)) {
-      const redirectUrl = response.headers.get('Location');
-      if (redirectUrl) {
-        console.log(`Redirect detected: ${redirectUrl}`);
-        const EMPTY_BODY_SHA256 = getEmptyBodySHA256();
-        const redirectHeaders = new Headers(request.headers);
-        redirectHeaders.set('Host', new URL(redirectUrl).hostname);
-        
-        // 对于任何重定向，都添加必要的AWS头（如果需要）
-        if (isAmazonS3(redirectUrl)) {
-          redirectHeaders.set('x-amz-content-sha256', EMPTY_BODY_SHA256);
-          redirectHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
-        }
-        
-        if (response.headers.get('Authorization')) {
-          redirectHeaders.set('Authorization', response.headers.get('Authorization'));
-        }
+      // 处理 S3 重定向（Docker 镜像层）
+      if (isDockerRequest && (response.status === 307 || response.status === 302)) {
+        const redirectUrl = response.headers.get('Location');
+        if (redirectUrl) {
+          console.log(`Redirect detected: ${redirectUrl}`);
+          const EMPTY_BODY_SHA256 = getEmptyBodySHA256();
+          const redirectHeaders = new Headers(request.headers);
+          redirectHeaders.set('Host', new URL(redirectUrl).hostname);
+          
+          // 对于任何重定向，都添加必要的AWS头（如果需要）
+          if (isAmazonS3(redirectUrl)) {
+            redirectHeaders.set('x-amz-content-sha256', EMPTY_BODY_SHA256);
+            redirectHeaders.set('x-amz-date', new Date().toISOString().replace(/[-:T]/g, '').slice(0, -5) + 'Z');
+          }
+          
+          if (response.headers.get('Authorization')) {
+            redirectHeaders.set('Authorization', response.headers.get('Authorization'));
+          }
 
-        const redirectRequest = new Request(redirectUrl, {
-          method: request.method,
-          headers: redirectHeaders,
-          body: request.body,
-          redirect: 'manual'
-        });
-        response = await fetch(redirectRequest);
-        console.log(`Redirect response: ${response.status} ${response.statusText}`);
-
-        if (!response.ok) {
-          console.log('Redirect request failed, returning original redirect response');
-          return new Response(response.body, {
-            status: response.status,
-            headers: response.headers
+          const redirectRequest = new Request(redirectUrl, {
+            method: request.method,
+            headers: redirectHeaders,
+            body: request.body,
+            redirect: 'manual'
           });
+          response = await fetch(redirectRequest);
+          console.log(`Redirect response: ${response.status} ${response.statusText}`);
+
+          if (!response.ok) {
+            console.log('Redirect request failed, returning original redirect response');
+            return new Response(response.body, {
+              status: response.status,
+              headers: response.headers
+            });
+          }
         }
       }
-    }
 
-    // 复制响应并添加 CORS 头
-    const newResponse = new Response(response.body, response);
-    newResponse.headers.set('Access-Control-Allow-Origin', '*');
-    newResponse.headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
-    if (isDockerRequest) {
-      newResponse.headers.set('Docker-Distribution-API-Version', 'registry/2.0');
-      // 删除可能存在的重定向头，确保所有请求都通过Worker处理
-      newResponse.headers.delete('Location');
+      // 复制响应并添加 CORS 头
+      const newResponse = new Response(response.body, response);
+      newResponse.headers.set('Access-Control-Allow-Origin', '*');
+      newResponse.headers.set('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
+      if (isDockerRequest) {
+        newResponse.headers.set('Docker-Distribution-API-Version', 'registry/2.0');
+        // 删除可能存在的重定向头，确保所有请求都通过Worker处理
+        newResponse.headers.delete('Location');
+      }
+      console.log(`Returning response with status: ${response.status}`);
+      return newResponse;
+    } catch (error) {
+      console.log(`Fetch error: ${error.message}`);
+      return new Response(`Error fetching from ${targetDomain}: ${error.message}\n`, { status: 500 });
     }
-    return newResponse;
   } catch (error) {
-    console.log(`Fetch error: ${error.message}`);
-    return new Response(`Error fetching from ${targetDomain}: ${error.message}\n`, { status: 500 });
+    console.error('Error in handleRequest:', error);
+    return new Response(`Internal server error: ${error.message}\n`, { status: 500 });
   }
 }
 
 export async function onRequest(context) {
   const { request } = context;
+  
+  // 记录请求信息用于调试
+  console.log('Incoming request:', {
+    url: request.url,
+    method: request.method,
+    headers: [...request.headers.entries()]
+  });
   
   // 检查请求路径，如果包含嵌套 URL 格式，则重写
   const url = new URL(request.url);
@@ -420,5 +440,6 @@ export async function onRequest(context) {
   }
   
   // 对于其他请求，直接处理
+  console.log('Handling request directly');
   return handleRequest(request);
 }

@@ -18,9 +18,9 @@ module.exports = {
       },
       dest: '/static/$1'
     },
-    // API 路由 - 所有其他请求都由边缘函数处理
+    // 所有其他请求都由边缘函数处理
     {
-      src: '^/(.*)$',
+      src: '^/(.*)',
       dest: '/functions/proxy.js'
     }
   ]
