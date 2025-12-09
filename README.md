@@ -8,7 +8,7 @@
 - [2.项目特点](README.md#2项目特点)
 - [3.Sing-box for VPS 运行脚本](README.md#3sing-box-for-vps-运行脚本)
 - [4.无交互极速安装](README.md#4无交互极速安装)
-- [5.Json Argo Tunnel 获取(推荐)](README.md#5json-argo-tunnel-获取推荐)
+- [5.Json Argo Tunnel 获取 (推荐)](README.md#5json-argo-tunnel-获取-推荐)
 - [6.Token Argo Tunnel 方案设置任意端口回源以使用 cdn](README.md#6token-argo-tunnel-方案设置任意端口回源以使用-cdn)
 - [7.Vmess / Vless 方案设置任意端口回源以使用 cdn](README.md#7vmess--vless-方案设置任意端口回源以使用-cdn)
 - [8.Docker 和 Docker compose 安装](README.md#8docker-和-docker-compose-安装)
@@ -372,7 +372,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/sing-box/main/sing-b
 | --NODE_NAME_CONFIRM | 节点名 |
 
 
-## 5.Json Argo Tunnel 获取(推荐)
+## 5.Json Argo Tunnel 获取 (推荐)
 
 ### 用户可以通过 Cloudflare Json 生成网轻松获取: https://fscarmen.cloudflare.now.cc
 
