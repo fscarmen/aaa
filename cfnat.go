@@ -86,7 +86,7 @@ func (m *IPManager) Clear() {
 	m.allIPsChecked = false
 }
 
-func (m *IPManager) switchToNextValidIP(port int, domain string, code int) bool {
+func (m *IPManager) switchToNextValidIP(tlsPort int, httpPort int, domain string, code int) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -99,7 +99,7 @@ func (m *IPManager) switchToNextValidIP(port int, domain string, code int) bool 
 			continue
 		}
 
-		if checkDualProtocolIP(ip, port, domain, code) {
+		if checkDualProtocolIP(ip, tlsPort, httpPort, domain, code) {
 			m.currentIP = ip
 			m.currentIndex = i
 			m.allIPsChecked = false
@@ -140,13 +140,13 @@ func main() {
 	ipCount := flag.Int("ipnum", 20, "提取的有效IP数量")
 	ipsType := flag.String("ips", "4", "指定生成IPv4还是IPv6地址 (4或6)")
 	num := flag.Int("num", 5, "目标负载 IP 数量")
-	port := flag.Int("port", 443, "转发的目标端口")
+	port := flag.Int("port", 443, "TLS 转发的目标端口")
+	httpPort := flag.Int("http-port", 80, "非 TLS/HTTP 转发的目标端口")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
-	deprecatedTLS := flag.Bool("tls", true, "已废弃：当前筛选逻辑固定要求同一 IP+端口同时支持 TLS 和非 TLS")
+	_ = flag.Bool("tls", true, "兼容旧参数，当前版本会自动识别 TLS/非 TLS 流量")
 
 	flag.Parse()
-	_ = deprecatedTLS
 
 	// 创建 IP 管理器
 	ipManager := NewIPManager()
@@ -281,7 +281,7 @@ func main() {
 		ipManager.SetIPAddresses(ips)
 
 		// 选择一个有效 IP
-		currentIP := selectValidIP(ipManager, *port, *domain, *code)
+		currentIP := selectValidIP(ipManager, *port, *httpPort, *domain, *code)
 		if currentIP == "" {
 			log.Printf("没有有效的 IP 可用")
 			continue
@@ -300,7 +300,7 @@ func main() {
 		// 启动状态检查线程
 		go func() {
 			defer loopWG.Done()
-			statusCheck(ctx, *localAddr, *port, done, *domain, *code, time.Duration(*Delay)*time.Millisecond, ipManager)
+			statusCheck(ctx, *port, *httpPort, done, *domain, *code, ipManager)
 		}()
 
 		// 主循环，接收连接
@@ -333,7 +333,7 @@ func main() {
 					log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 
 					currIP := ipManager.GetCurrentIP()
-					go handleConnection(conn, generateTargets(currIP, *port, *num), time.Duration(*Delay)*time.Millisecond)
+					go handleConnection(conn, currIP, *port, *httpPort, *num, time.Duration(*Delay)*time.Millisecond)
 				}
 			}
 		}()
@@ -657,16 +657,16 @@ func generateTargets(ip string, port int, num int) []string {
 	return targets
 }
 
-func splitCheckDomain(domain string) (host string, path string) {
+func splitDomainPath(domain string) (string, string) {
 	domain = strings.TrimSpace(domain)
-	domain = strings.TrimPrefix(domain, "http://")
 	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimPrefix(domain, "http://")
 	if domain == "" {
-		return "", "/"
+		return "cloudflaremirrors.com", "/"
 	}
 	parts := strings.SplitN(domain, "/", 2)
-	host = parts[0]
-	path = "/"
+	host := parts[0]
+	path := "/"
 	if len(parts) == 2 && parts[1] != "" {
 		path = "/" + parts[1]
 	}
@@ -674,196 +674,173 @@ func splitCheckDomain(domain string) (host string, path string) {
 }
 
 func checkValidIP(ip string, port int, useTLS bool, domain string, code int) bool {
-	host, path := splitCheckDomain(domain)
-	if host == "" {
-		log.Printf("检查域名为空，跳过 IP: %s", ip)
-		return false
-	}
-
+	host, path := splitDomainPath(domain)
 	address := ip
 	if strings.Contains(ip, ":") {
 		address = fmt.Sprintf("[%s]", ip)
 	}
-	targetAddr := fmt.Sprintf("%s:%d", address, port)
-	protocolName := "非 TLS"
+
+	scheme := "http"
+	name := "非 TLS"
 	if useTLS {
-		protocolName = "TLS"
+		scheme = "https"
+		name = "TLS"
 	}
 
-	log.Printf("开始 %s 检查 IP: %s 端口: %d Host: %s Path: %s", protocolName, ip, port, host, path)
-
-	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	var conn net.Conn
-	var err error
-	if useTLS {
-		conn, err = tls.DialWithDialer(dialer, "tcp", targetAddr, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true,
-		})
-	} else {
-		conn, err = dialer.Dial("tcp", targetAddr)
+	transport := &http.Transport{
+		TLSClientConfig:   &tls.Config{ServerName: host, InsecureSkipVerify: true},
+		DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			log.Printf("尝试 %s 连接 IP: %s 端口: %d Host: %s", name, ip, port, host)
+			dialer := &net.Dialer{Timeout: 2 * time.Second}
+			return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
+		},
 	}
+	defer transport.CloseIdleConnections()
+
+	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
+	targetURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
+	log.Printf("开始 %s 检查 IP: %s 端口: %d URL: %s", name, ip, port, targetURL)
+
+	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
-		log.Printf("IP %s %s 连接失败: %v", ip, protocolName, err)
-		return false
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	req, err := http.NewRequest("GET", path, nil)
-	if err != nil {
-		log.Printf("构造检查请求失败: %v", err)
+		log.Printf("创建 %s 检查请求失败: %v", name, err)
 		return false
 	}
 	req.Host = host
-	req.Header.Set("Host", host)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Header.Set("Connection", "close")
 	req.Close = true
 
-	if err = req.Write(conn); err != nil {
-		log.Printf("IP %s %s 写入请求失败: %v", ip, protocolName, err)
-		return false
-	}
-
-	reader := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(reader, req)
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("IP %s %s 读取响应失败: %v", ip, protocolName, err)
+		log.Printf("%s 检查 IP %s 时发生错误: %v", name, ip, err)
 		return false
 	}
 	defer resp.Body.Close()
 
-	log.Printf("IP %s %s 检查响应状态码: %d", ip, protocolName, resp.StatusCode)
-	if resp.StatusCode == code {
-		log.Printf("IP %s 通过 %s 检查", ip, protocolName)
-		return true
-	}
-	log.Printf("IP %s 未通过 %s 检查，期望状态码: %d，实际状态码: %d", ip, protocolName, code, resp.StatusCode)
-	return false
-}
-func checkDualProtocolIP(ip string, port int, domain string, code int) bool {
-	log.Printf("开始双协议检查 IP: %s 端口: %d", ip, port)
-
-	if !checkValidIP(ip, port, true, domain, code) {
-		log.Printf("IP %s 未通过 TLS 检查", ip)
+	log.Printf("IP %s %s 检查响应状态码: %d", ip, name, resp.StatusCode)
+	if resp.StatusCode != code {
+		log.Printf("IP %s 未通过 %s 检查，期望状态码: %d，实际状态码: %d", ip, name, code, resp.StatusCode)
 		return false
 	}
-
-	if !checkValidIP(ip, port, false, domain, code) {
-		log.Printf("IP %s 未通过非 TLS 检查", ip)
-		return false
-	}
-
-	log.Printf("IP %s 已通过 TLS 和非 TLS 双协议检查", ip)
+	log.Printf("IP %s 通过 %s 检查", ip, name)
 	return true
 }
 
-func selectValidIP(ipManager *IPManager, port int, domain string, code int) string {
+func checkDualProtocolIP(ip string, tlsPort int, httpPort int, domain string, code int) bool {
+	log.Printf("开始双协议检查 IP: %s TLS端口: %d 非TLS端口: %d", ip, tlsPort, httpPort)
+	if !checkValidIP(ip, tlsPort, true, domain, code) {
+		log.Printf("IP %s 未通过 TLS 检查", ip)
+		return false
+	}
+	if !checkValidIP(ip, httpPort, false, domain, code) {
+		log.Printf("IP %s 未通过非 TLS 检查", ip)
+		return false
+	}
+	log.Printf("IP %s 通过双协议检查", ip)
+	return true
+}
+
+func selectValidIP(ipManager *IPManager, tlsPort int, httpPort int, domain string, code int) string {
 	for _, ip := range ipManager.GetIPAddresses() {
-		if checkDualProtocolIP(ip, port, domain, code) {
+		if checkDualProtocolIP(ip, tlsPort, httpPort, domain, code) {
 			return ip
 		}
 	}
 	return ""
 }
 
-func statusCheck(ctx context.Context, localAddr string, port int, done chan bool, domain string, code int, delay time.Duration, ipManager *IPManager) {
-	_, localPort, _ := net.SplitHostPort(localAddr)
-	checkAddr := fmt.Sprintf("127.0.0.1:%s", localPort)
-
+func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool, domain string, code int, ipManager *IPManager) {
+	failCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("状态检查收到退出信号")
 			return
-		default:
+		case <-time.After(10 * time.Second):
 		}
 
-		failCount := 0
-		log.Printf("开始状态检查，目标地址: %s", checkAddr)
-
-		for failCount < 2 {
-			select {
-			case <-ctx.Done():
-				log.Println("状态检查收到退出信号")
-				return
-			default:
-			}
-
-			conn, err := net.DialTimeout("tcp", checkAddr, delay)
-			if err != nil {
-				failCount++
-				log.Printf("状态检查失败 (%d/2): 无法连接到 %s 错误: %v", failCount, checkAddr, err)
-				time.Sleep(1 * time.Second)
-				continue
-			}
-
-			// 使用带超时的读取检查
-			checkSuccess := make(chan bool, 1)
-			go func() {
-				reader := bufio.NewReader(conn)
-				conn.SetReadDeadline(time.Now().Add(delay + 1*time.Second))
-				_, err := reader.ReadString('\n')
-				if err != nil {
-					if err == io.EOF {
-						checkSuccess <- false
-					} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						// 超时说明连接保持正常
-						checkSuccess <- true
-					} else {
-						checkSuccess <- false
-					}
-				} else {
-					checkSuccess <- true
-				}
-			}()
-
-			select {
-			case success := <-checkSuccess:
-				if success {
-					log.Printf("状态检查成功: 连接到 %s 成功", checkAddr)
-					failCount = 0
-				} else {
-					failCount++
-					log.Printf("状态检查失败 (%d/2): 服务端断开连接", failCount)
-				}
-			case <-time.After(delay + 2*time.Second):
-				log.Printf("状态检查成功: 连接到 %s 保持稳定", checkAddr)
-				failCount = 0
-			case <-ctx.Done():
-				conn.Close()
-				log.Println("状态检查收到退出信号")
-				return
-			}
-
-			conn.Close()
-
-			if failCount == 0 {
-				time.Sleep(2 * time.Second)
-				break
-			}
+		currentIP := ipManager.GetCurrentIP()
+		if currentIP == "" {
+			failCount++
+			log.Printf("状态检查失败 (%d/2): 当前 IP 为空", failCount)
+		} else if checkDualProtocolIP(currentIP, tlsPort, httpPort, domain, code) {
+			failCount = 0
+			log.Printf("状态检查成功: 当前 IP %s 双协议可用", currentIP)
+		} else {
+			failCount++
+			log.Printf("状态检查失败 (%d/2): 当前 IP %s 双协议不可用", failCount, currentIP)
 		}
 
 		if failCount >= 2 {
 			log.Println("连续两次状态检查失败，切换到下一个 IP")
-			if !ipManager.switchToNextValidIP(port, domain, code) {
+			if !ipManager.switchToNextValidIP(tlsPort, httpPort, domain, code) {
 				log.Println("所有 IP 都已检查过，状态检查停止")
 				done <- true
 				return
 			}
+			failCount = 0
 		}
 	}
 }
 
-// 处理客户端连接，尝试连接到指定的转发地址，并选择延迟最低的连接
-func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration) {
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+}
+
+func (c *prefixedConn) Read(p []byte) (int, error) {
+	if len(c.prefix) > 0 {
+		n := copy(p, c.prefix)
+		c.prefix = c.prefix[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
+}
+
+func sniffFirstByte(conn net.Conn, delay time.Duration) ([]byte, bool, error) {
+	first := make([]byte, 1)
+	readTimeout := 2 * time.Second
+	if delay > readTimeout {
+		readTimeout = delay
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	n, err := conn.Read(first)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, false, err
+	}
+	if n == 0 {
+		return nil, false, io.EOF
+	}
+	return first[:n], first[0] == 0x16, nil
+}
+
+// 处理客户端连接，自动识别 TLS/非 TLS，并转发到对应 Cloudflare 端口
+func handleConnection(conn net.Conn, ip string, tlsPort int, httpPort int, num int, delay time.Duration) {
 	defer func() {
 		clientAddr := conn.RemoteAddr().String()
 		atomic.AddInt32(&activeConnections, -1)
 		log.Printf("客户端来源: %s 连接关闭，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 		conn.Close()
 	}()
+
+	first, isTLS, err := sniffFirstByte(conn, delay)
+	if err != nil {
+		log.Printf("读取客户端首字节失败，关闭连接: %v", err)
+		return
+	}
+
+	targetPort := httpPort
+	protocolName := "非 TLS"
+	if isTLS {
+		targetPort = tlsPort
+		protocolName = "TLS"
+	}
+	log.Printf("识别客户端协议: %s，转发到 IP: %s 端口: %d", protocolName, ip, targetPort)
+
+	clientConn := &prefixedConn{Conn: conn, prefix: first}
+	forwardAddrs := generateTargets(ip, targetPort, num)
 
 	type connResult struct {
 		conn   net.Conn
@@ -873,19 +850,15 @@ func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration)
 	}
 
 	results := make(chan connResult, len(forwardAddrs))
-
-	// 并发尝试连接每个转发地址
 	for _, addr := range forwardAddrs {
 		go func(targetAddr string) {
 			start := time.Now()
 			forwardConn, err := net.DialTimeout("tcp", targetAddr, delay)
 			elapsed := time.Since(start)
-
 			if err != nil {
 				results <- connResult{nil, targetAddr, elapsed, fmt.Sprintf("连接到 %s 的延迟超过有效值 %d ms", targetAddr, delay.Milliseconds())}
 				return
 			}
-
 			results <- connResult{forwardConn, targetAddr, elapsed, ""}
 		}(addr)
 	}
@@ -894,13 +867,10 @@ func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration)
 	var bestConn net.Conn
 	var bestDelay time.Duration
 	var bestAddr string
-
-	// 收集结果并找到延迟最低的有效连接
 	for i := 0; i < len(forwardAddrs); i++ {
 		res := <-results
 		if res.conn != nil {
 			validConns = append(validConns, res)
-
 			if bestConn == nil || res.delay < bestDelay {
 				if bestConn != nil {
 					bestConn.Close()
@@ -921,10 +891,9 @@ func handleConnection(conn net.Conn, forwardAddrs []string, delay time.Duration)
 		log.Printf("地址: %s 延迟: %d ms", vc.addr, vc.delay.Milliseconds())
 	}
 
-	// 如果找到最佳连接，开始转发数据
 	if bestConn != nil {
 		log.Printf("选择最佳连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
-		pipeConnections(conn, bestConn)
+		pipeConnections(clientConn, bestConn)
 	} else {
 		log.Println("未找到符合延迟要求的连接，关闭客户端连接")
 	}
