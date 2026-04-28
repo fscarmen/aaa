@@ -35,6 +35,21 @@ var (
 	copyBufferPool    = sync.Pool{New: func() interface{} { b := make([]byte, 32*1024); return &b }}
 )
 
+var (
+	ipsV4URLs = []string{
+		"https://cdn.jsdelivr.net/gh/fscarmen/cfnat@main/ips-v4",
+		"https://raw.githubusercontent.com/fscarmen/cfnat/main/ips-v4",
+	}
+	ipsV6URLs = []string{
+		"https://cdn.jsdelivr.net/gh/fscarmen/cfnat@main/ips-v6",
+		"https://raw.githubusercontent.com/fscarmen/cfnat/main/ips-v6",
+	}
+	locationsURLs = []string{
+		"https://cdn.jsdelivr.net/gh/fscarmen/cfnat@main/locations",
+		"https://raw.githubusercontent.com/fscarmen/cfnat/main/locations",
+	}
+)
+
 func debugf(format string, v ...interface{}) {
 	if verboseLog {
 		log.Printf(format, v...)
@@ -200,17 +215,17 @@ func main() {
 			locationMap[loc.Iata] = loc
 		}
 
-		var url string
 		var filename string
+		var downloadURLs []string
 
 		// 使用 switch 替代 if-else
 		switch *ipsType {
 		case "6":
 			filename = "ips-v6.txt"
-			url = "https://www.baipiao.eu.org/cloudflare/ips-v6"
+			downloadURLs = ipsV6URLs
 		case "4":
 			filename = "ips-v4.txt"
-			url = "https://www.baipiao.eu.org/cloudflare/ips-v4"
+			downloadURLs = ipsV4URLs
 		default:
 			fmt.Println("无效的IP类型。请使用 '4' 或 '6'")
 			return
@@ -220,8 +235,8 @@ func main() {
 
 		// 检查本地是否有文件
 		if _, err = os.Stat(filename); os.IsNotExist(err) {
-			fmt.Printf("文件 %s 不存在，正在从 URL %s 下载数据\n", filename, url)
-			content, err = getURLContent(url)
+			fmt.Printf("文件 %s 不存在，正在下载数据\n", filename)
+			content, err = getURLContentFromList(downloadURLs)
 			if err != nil {
 				fmt.Println("获取URL内容出错:", err)
 				return
@@ -377,16 +392,10 @@ func loadLocations() ([]location, error) {
 	var locations []location
 
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
-		fmt.Println("本地 locations.json 不存在\n正在从 https://www.baipiao.eu.org/cloudflare/locations 下载 locations.json")
-		resp, err := http.Get("https://www.baipiao.eu.org/cloudflare/locations")
+		fmt.Println("本地 locations.json 不存在，正在下载 locations.json")
+		body, err := getURLBytesFromList(locationsURLs)
 		if err != nil {
 			return nil, fmt.Errorf("无法从URL中获取JSON: %v", err)
-		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("无法读取响应体: %v", err)
 		}
 
 		err = json.Unmarshal(body, &locations)
@@ -543,6 +552,46 @@ func getURLContent(url string) (string, error) {
 	}
 
 	return content.String(), nil
+}
+
+func getURLContentFromList(urls []string) (string, error) {
+	var lastErr error
+	for _, url := range urls {
+		content, err := getURLContent(url)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+		log.Printf("从 %s 下载失败: %v", url, err)
+	}
+	return "", lastErr
+}
+
+func getURLBytesFromList(urls []string) ([]byte, error) {
+	var lastErr error
+	for _, url := range urls {
+		body, err := getURLBytes(url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		log.Printf("从 %s 下载失败: %v", url, err)
+	}
+	return nil, lastErr
+}
+
+func getURLBytes(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
 }
 
 // 从本地文件读取内容
