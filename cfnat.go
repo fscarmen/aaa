@@ -657,58 +657,91 @@ func generateTargets(ip string, port int, num int) []string {
 	return targets
 }
 
+func splitCheckDomain(domain string) (host string, path string) {
+	domain = strings.TrimSpace(domain)
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+	if domain == "" {
+		return "", "/"
+	}
+	parts := strings.SplitN(domain, "/", 2)
+	host = parts[0]
+	path = "/"
+	if len(parts) == 2 && parts[1] != "" {
+		path = "/" + parts[1]
+	}
+	return host, path
+}
+
 func checkValidIP(ip string, port int, useTLS bool, domain string, code int) bool {
+	host, path := splitCheckDomain(domain)
+	if host == "" {
+		log.Printf("检查域名为空，跳过 IP: %s", ip)
+		return false
+	}
+
 	address := ip
 	if strings.Contains(ip, ":") {
 		address = fmt.Sprintf("[%s]", ip)
 	}
-	targetURL := fmt.Sprintf("http://%s", domain)
+	targetAddr := fmt.Sprintf("%s:%d", address, port)
+	protocolName := "非 TLS"
 	if useTLS {
-		targetURL = fmt.Sprintf("https://%s", domain)
+		protocolName = "TLS"
 	}
 
-	cacheKey := fmt.Sprintf("%s:%d", address, port)
-	clientAny, loaded := validIPClientCache.Load(cacheKey)
-	var client *http.Client
-	if loaded {
-		client = clientAny.(*http.Client)
+	log.Printf("开始 %s 检查 IP: %s 端口: %d Host: %s Path: %s", protocolName, ip, port, host, path)
+
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	var conn net.Conn
+	var err error
+	if useTLS {
+		conn, err = tls.DialWithDialer(dialer, "tcp", targetAddr, &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true,
+		})
 	} else {
-		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				log.Printf("尝试连接 IP: %s 端口: %d", ip, port)
-				dialer := &net.Dialer{Timeout: 2 * time.Second}
-				return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
-			},
-		}
-		newClient := &http.Client{
-			Timeout:   2 * time.Second,
-			Transport: transport,
-		}
-		actual, _ := validIPClientCache.LoadOrStore(cacheKey, newClient)
-		client = actual.(*http.Client)
+		conn, err = dialer.Dial("tcp", targetAddr)
+	}
+	if err != nil {
+		log.Printf("IP %s %s 连接失败: %v", ip, protocolName, err)
+		return false
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	req, err := http.NewRequest("GET", path, nil)
+	if err != nil {
+		log.Printf("构造检查请求失败: %v", err)
+		return false
+	}
+	req.Host = host
+	req.Header.Set("Host", host)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Connection", "close")
+	req.Close = true
+
+	if err = req.Write(conn); err != nil {
+		log.Printf("IP %s %s 写入请求失败: %v", ip, protocolName, err)
+		return false
 	}
 
-	log.Printf("向 URL %s 发送请求以检查 IP %s 是否有效", targetURL, ip)
-	resp, err := client.Get(targetURL)
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, req)
 	if err != nil {
-		log.Printf("检查 IP %s 时发生错误: %v", ip, err)
+		log.Printf("IP %s %s 读取响应失败: %v", ip, protocolName, err)
 		return false
 	}
 	defer resp.Body.Close()
 
-	log.Printf("IP %s 的检查响应状态码: %d", ip, resp.StatusCode)
-
-	isValid := resp.StatusCode == code
-	if isValid {
-		log.Printf("IP %s 是有效的", ip)
-	} else {
-		log.Printf("IP %s 不是有效的", ip)
+	log.Printf("IP %s %s 检查响应状态码: %d", ip, protocolName, resp.StatusCode)
+	if resp.StatusCode == code {
+		log.Printf("IP %s 通过 %s 检查", ip, protocolName)
+		return true
 	}
-
-	return isValid
+	log.Printf("IP %s 未通过 %s 检查，期望状态码: %d，实际状态码: %d", ip, protocolName, code, resp.StatusCode)
+	return false
 }
-
 func checkDualProtocolIP(ip string, port int, domain string, code int) bool {
 	log.Printf("开始双协议检查 IP: %s 端口: %d", ip, port)
 
