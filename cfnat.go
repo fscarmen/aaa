@@ -30,7 +30,21 @@ var (
 	validIPClientCache sync.Map
 	randomMu           sync.Mutex
 	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
+	verboseLog         bool
+	connLog            bool
 )
+
+func debugf(format string, v ...interface{}) {
+	if verboseLog {
+		log.Printf(format, v...)
+	}
+}
+
+func connf(format string, v ...interface{}) {
+	if connLog || verboseLog {
+		log.Printf(format, v...)
+	}
+}
 
 // IPManager 用于安全管理 IP 地址状态
 type IPManager struct {
@@ -144,9 +158,14 @@ func main() {
 	httpPort := flag.Int("http-port", 80, "非 TLS/HTTP 转发的目标端口")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
+	healthLogInterval := flag.Int("health-log", 60, "健康检查成功日志间隔（秒），0 表示不打印成功日志")
+	verbose := flag.Bool("verbose", false, "打印详细调试日志，包括每个 IP 的检查过程和每条候选连接")
+	logConn := flag.Bool("log-conn", false, "打印每个客户端连接的建立、协议识别和关闭日志")
 	_ = flag.Bool("tls", true, "兼容旧参数，当前版本会自动识别 TLS/非 TLS 流量")
 
 	flag.Parse()
+	verboseLog = *verbose
+	connLog = *logConn
 
 	// 创建 IP 管理器
 	ipManager := NewIPManager()
@@ -158,7 +177,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	log.Printf("正在监听 %s 并转发到 %d 个目标地址，有效延迟：%d ms", *localAddr, *num, *Delay)
+	log.Printf("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，负载连接数：%d，有效延迟：%d ms", *localAddr, *port, *httpPort, *num, *Delay)
 
 	for {
 		startTime := time.Now()
@@ -300,7 +319,7 @@ func main() {
 		// 启动状态检查线程
 		go func() {
 			defer loopWG.Done()
-			statusCheck(ctx, *port, *httpPort, done, *domain, *code, ipManager)
+			statusCheck(ctx, *port, *httpPort, done, *domain, *code, ipManager, time.Duration(*healthLogInterval)*time.Second)
 		}()
 
 		// 主循环，接收连接
@@ -330,7 +349,7 @@ func main() {
 
 					clientAddr := conn.RemoteAddr().String()
 					atomic.AddInt32(&activeConnections, 1)
-					log.Printf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
+					connf("客户端来源: %s 连接建立，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 
 					currIP := ipManager.GetCurrentIP()
 					go handleConnection(conn, currIP, *port, *httpPort, *num, time.Duration(*Delay)*time.Millisecond)
@@ -481,10 +500,10 @@ func scanIPs(ipList []string, locationMap map[string]location, maxThreads int) [
 			loc, ok := locationMap[dataCenter]
 			mu.Lock()
 			if ok {
-				fmt.Printf("发现有效IP %s 位置信息 %s 延迟 %d 毫秒\n", ipAddr, loc.City, tcpDuration.Milliseconds())
+				debugf("发现有效IP %s 位置信息 %s 延迟 %d 毫秒", ipAddr, loc.City, tcpDuration.Milliseconds())
 				results = append(results, result{ipAddr, dataCenter, loc.Region, loc.City, fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration})
 			} else {
-				fmt.Printf("发现有效IP %s 位置信息未知 延迟 %d 毫秒\n", ipAddr, tcpDuration.Milliseconds())
+				debugf("发现有效IP %s 位置信息未知 延迟 %d 毫秒", ipAddr, tcpDuration.Milliseconds())
 				results = append(results, result{ipAddr, dataCenter, "", "", fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration})
 			}
 			mu.Unlock()
@@ -691,7 +710,7 @@ func checkValidIP(ip string, port int, useTLS bool, domain string, code int) boo
 		TLSClientConfig:   &tls.Config{ServerName: host, InsecureSkipVerify: true},
 		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			log.Printf("尝试 %s 连接 IP: %s 端口: %d Host: %s", name, ip, port, host)
+			debugf("尝试 %s 连接 IP: %s 端口: %d Host: %s", name, ip, port, host)
 			dialer := &net.Dialer{Timeout: 2 * time.Second}
 			return dialer.DialContext(ctx, network, fmt.Sprintf("%s:%d", address, port))
 		},
@@ -700,11 +719,11 @@ func checkValidIP(ip string, port int, useTLS bool, domain string, code int) boo
 
 	client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
 	targetURL := fmt.Sprintf("%s://%s%s", scheme, host, path)
-	log.Printf("开始 %s 检查 IP: %s 端口: %d URL: %s", name, ip, port, targetURL)
+	debugf("开始 %s 检查 IP: %s 端口: %d URL: %s", name, ip, port, targetURL)
 
 	req, err := http.NewRequest("GET", targetURL, nil)
 	if err != nil {
-		log.Printf("创建 %s 检查请求失败: %v", name, err)
+		debugf("创建 %s 检查请求失败: %v", name, err)
 		return false
 	}
 	req.Host = host
@@ -713,31 +732,31 @@ func checkValidIP(ip string, port int, useTLS bool, domain string, code int) boo
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("%s 检查 IP %s 时发生错误: %v", name, ip, err)
+		debugf("%s 检查 IP %s 时发生错误: %v", name, ip, err)
 		return false
 	}
 	defer resp.Body.Close()
 
-	log.Printf("IP %s %s 检查响应状态码: %d", ip, name, resp.StatusCode)
+	debugf("IP %s %s 检查响应状态码: %d", ip, name, resp.StatusCode)
 	if resp.StatusCode != code {
-		log.Printf("IP %s 未通过 %s 检查，期望状态码: %d，实际状态码: %d", ip, name, code, resp.StatusCode)
+		debugf("IP %s 未通过 %s 检查，期望状态码: %d，实际状态码: %d", ip, name, code, resp.StatusCode)
 		return false
 	}
-	log.Printf("IP %s 通过 %s 检查", ip, name)
+	debugf("IP %s 通过 %s 检查", ip, name)
 	return true
 }
 
 func checkDualProtocolIP(ip string, tlsPort int, httpPort int, domain string, code int) bool {
-	log.Printf("开始双协议检查 IP: %s TLS端口: %d 非TLS端口: %d", ip, tlsPort, httpPort)
+	debugf("开始双协议检查 IP: %s TLS端口: %d 非TLS端口: %d", ip, tlsPort, httpPort)
 	if !checkValidIP(ip, tlsPort, true, domain, code) {
-		log.Printf("IP %s 未通过 TLS 检查", ip)
+		debugf("IP %s 未通过 TLS 检查", ip)
 		return false
 	}
 	if !checkValidIP(ip, httpPort, false, domain, code) {
-		log.Printf("IP %s 未通过非 TLS 检查", ip)
+		debugf("IP %s 未通过非 TLS 检查", ip)
 		return false
 	}
-	log.Printf("IP %s 通过双协议检查", ip)
+	log.Printf("双协议可用 IP: %s (TLS:%d HTTP:%d)", ip, tlsPort, httpPort)
 	return true
 }
 
@@ -750,8 +769,9 @@ func selectValidIP(ipManager *IPManager, tlsPort int, httpPort int, domain strin
 	return ""
 }
 
-func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool, domain string, code int, ipManager *IPManager) {
+func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool, domain string, code int, ipManager *IPManager, healthLogInterval time.Duration) {
 	failCount := 0
+	lastSuccessLog := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -765,8 +785,12 @@ func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool,
 			failCount++
 			log.Printf("状态检查失败 (%d/2): 当前 IP 为空", failCount)
 		} else if checkDualProtocolIP(currentIP, tlsPort, httpPort, domain, code) {
+			wasFailing := failCount > 0
 			failCount = 0
-			log.Printf("状态检查成功: 当前 IP %s 双协议可用", currentIP)
+			if wasFailing || (healthLogInterval > 0 && time.Since(lastSuccessLog) >= healthLogInterval) {
+				log.Printf("状态检查成功: 当前 IP %s 双协议可用", currentIP)
+				lastSuccessLog = time.Now()
+			}
 		} else {
 			failCount++
 			log.Printf("状态检查失败 (%d/2): 当前 IP %s 双协议不可用", failCount, currentIP)
@@ -821,7 +845,7 @@ func handleConnection(conn net.Conn, ip string, tlsPort int, httpPort int, num i
 	defer func() {
 		clientAddr := conn.RemoteAddr().String()
 		atomic.AddInt32(&activeConnections, -1)
-		log.Printf("客户端来源: %s 连接关闭，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
+		connf("客户端来源: %s 连接关闭，当前活跃连接数: %d", clientAddr, atomic.LoadInt32(&activeConnections))
 		conn.Close()
 	}()
 
@@ -837,7 +861,7 @@ func handleConnection(conn net.Conn, ip string, tlsPort int, httpPort int, num i
 		targetPort = tlsPort
 		protocolName = "TLS"
 	}
-	log.Printf("识别客户端协议: %s，转发到 IP: %s 端口: %d", protocolName, ip, targetPort)
+	connf("识别客户端协议: %s，转发到 IP: %s 端口: %d", protocolName, ip, targetPort)
 
 	clientConn := &prefixedConn{Conn: conn, prefix: first}
 	forwardAddrs := generateTargets(ip, targetPort, num)
@@ -882,17 +906,19 @@ func handleConnection(conn net.Conn, ip string, tlsPort int, httpPort int, num i
 				res.conn.Close()
 			}
 		} else {
-			log.Printf("错误: %s", res.errMsg)
+			debugf("错误: %s", res.errMsg)
 		}
 	}
 
-	log.Println("符合要求的连接:")
-	for _, vc := range validConns {
-		log.Printf("地址: %s 延迟: %d ms", vc.addr, vc.delay.Milliseconds())
+	if verboseLog {
+		log.Println("符合要求的连接:")
+		for _, vc := range validConns {
+			log.Printf("地址: %s 延迟: %d ms", vc.addr, vc.delay.Milliseconds())
+		}
 	}
 
 	if bestConn != nil {
-		log.Printf("选择最佳连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
+		connf("选择最佳连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
 		pipeConnections(clientConn, bestConn)
 	} else {
 		log.Println("未找到符合延迟要求的连接，关闭客户端连接")
