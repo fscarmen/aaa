@@ -34,6 +34,38 @@ var (
 	connLog            bool
 )
 
+type CheckMode int
+
+const (
+	CheckModeBoth CheckMode = iota
+	CheckModeTLS
+	CheckModeHTTP
+)
+
+func parseCheckMode(raw string) (CheckMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "both", "all", "dual", "auto":
+		return CheckModeBoth, nil
+	case "tls", "https":
+		return CheckModeTLS, nil
+	case "http", "non-tls", "notls", "plain":
+		return CheckModeHTTP, nil
+	default:
+		return CheckModeBoth, fmt.Errorf("无效的检查模式 %q，可选: both, tls, http", raw)
+	}
+}
+
+func (m CheckMode) String() string {
+	switch m {
+	case CheckModeTLS:
+		return "TLS"
+	case CheckModeHTTP:
+		return "非TLS"
+	default:
+		return "双协议"
+	}
+}
+
 func debugf(format string, v ...interface{}) {
 	if verboseLog {
 		log.Printf(format, v...)
@@ -100,7 +132,7 @@ func (m *IPManager) Clear() {
 	m.allIPsChecked = false
 }
 
-func (m *IPManager) switchToNextValidIP(tlsPort int, httpPort int, domain string, code int) bool {
+func (m *IPManager) switchToNextValidIP(mode CheckMode, tlsPort int, httpPort int, domain string, code int) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -113,11 +145,11 @@ func (m *IPManager) switchToNextValidIP(tlsPort int, httpPort int, domain string
 			continue
 		}
 
-		if checkDualProtocolIP(ip, tlsPort, httpPort, domain, code) {
+		if checkIPByMode(ip, mode, tlsPort, httpPort, domain, code) {
 			m.currentIP = ip
 			m.currentIndex = i
 			m.allIPsChecked = false
-			log.Printf("切换到新的有效 IP: %s 更新 IP 索引: %d", m.currentIP, m.currentIndex)
+			log.Printf("切换到新的有效 IP: %s 检查模式: %s 更新 IP 索引: %d", m.currentIP, mode.String(), m.currentIndex)
 			return true
 		}
 	}
@@ -156,6 +188,7 @@ func main() {
 	num := flag.Int("num", 5, "目标负载 IP 数量")
 	port := flag.Int("port", 443, "TLS 转发的目标端口")
 	httpPort := flag.Int("http-port", 80, "非 TLS/HTTP 转发的目标端口")
+	checkModeRaw := flag.String("check-mode", "both", "IP 健康检查模式: both/tls/http，默认 both")
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
 	healthLogInterval := flag.Int("health-log", 60, "健康检查成功日志间隔（秒），0 表示不打印成功日志")
@@ -164,6 +197,10 @@ func main() {
 	_ = flag.Bool("tls", true, "兼容旧参数，当前版本会自动识别 TLS/非 TLS 流量")
 
 	flag.Parse()
+	checkMode, err := parseCheckMode(*checkModeRaw)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 	verboseLog = *verbose
 	connLog = *logConn
 
@@ -177,7 +214,7 @@ func main() {
 	}
 	defer listener.Close()
 
-	log.Printf("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，负载连接数：%d，有效延迟：%d ms", *localAddr, *port, *httpPort, *num, *Delay)
+	log.Printf("正在监听 %s，检查模式：%s，TLS目标端口：%d，非TLS目标端口：%d，负载连接数：%d，有效延迟：%d ms", *localAddr, checkMode.String(), *port, *httpPort, *num, *Delay)
 
 	for {
 		startTime := time.Now()
@@ -300,7 +337,7 @@ func main() {
 		ipManager.SetIPAddresses(ips)
 
 		// 选择一个有效 IP
-		currentIP := selectValidIP(ipManager, *port, *httpPort, *domain, *code)
+		currentIP := selectValidIP(ipManager, checkMode, *port, *httpPort, *domain, *code)
 		if currentIP == "" {
 			log.Printf("没有有效的 IP 可用")
 			continue
@@ -319,7 +356,7 @@ func main() {
 		// 启动状态检查线程
 		go func() {
 			defer loopWG.Done()
-			statusCheck(ctx, *port, *httpPort, done, *domain, *code, ipManager, time.Duration(*healthLogInterval)*time.Second)
+			statusCheck(ctx, checkMode, *port, *httpPort, done, *domain, *code, ipManager, time.Duration(*healthLogInterval)*time.Second)
 		}()
 
 		// 主循环，接收连接
@@ -760,16 +797,39 @@ func checkDualProtocolIP(ip string, tlsPort int, httpPort int, domain string, co
 	return true
 }
 
-func selectValidIP(ipManager *IPManager, tlsPort int, httpPort int, domain string, code int) string {
+func checkIPByMode(ip string, mode CheckMode, tlsPort int, httpPort int, domain string, code int) bool {
+	switch mode {
+	case CheckModeTLS:
+		debugf("开始 TLS-only 检查 IP: %s TLS端口: %d", ip, tlsPort)
+		if !checkValidIP(ip, tlsPort, true, domain, code) {
+			debugf("IP %s 未通过 TLS 检查", ip)
+			return false
+		}
+		log.Printf("TLS 可用 IP: %s (TLS:%d)", ip, tlsPort)
+		return true
+	case CheckModeHTTP:
+		debugf("开始非 TLS-only 检查 IP: %s 非TLS端口: %d", ip, httpPort)
+		if !checkValidIP(ip, httpPort, false, domain, code) {
+			debugf("IP %s 未通过非 TLS 检查", ip)
+			return false
+		}
+		log.Printf("非TLS 可用 IP: %s (HTTP:%d)", ip, httpPort)
+		return true
+	default:
+		return checkDualProtocolIP(ip, tlsPort, httpPort, domain, code)
+	}
+}
+
+func selectValidIP(ipManager *IPManager, mode CheckMode, tlsPort int, httpPort int, domain string, code int) string {
 	for _, ip := range ipManager.GetIPAddresses() {
-		if checkDualProtocolIP(ip, tlsPort, httpPort, domain, code) {
+		if checkIPByMode(ip, mode, tlsPort, httpPort, domain, code) {
 			return ip
 		}
 	}
 	return ""
 }
 
-func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool, domain string, code int, ipManager *IPManager, healthLogInterval time.Duration) {
+func statusCheck(ctx context.Context, mode CheckMode, tlsPort int, httpPort int, done chan bool, domain string, code int, ipManager *IPManager, healthLogInterval time.Duration) {
 	failCount := 0
 	lastSuccessLog := time.Time{}
 	for {
@@ -784,21 +844,21 @@ func statusCheck(ctx context.Context, tlsPort int, httpPort int, done chan bool,
 		if currentIP == "" {
 			failCount++
 			log.Printf("状态检查失败 (%d/2): 当前 IP 为空", failCount)
-		} else if checkDualProtocolIP(currentIP, tlsPort, httpPort, domain, code) {
+		} else if checkIPByMode(currentIP, mode, tlsPort, httpPort, domain, code) {
 			wasFailing := failCount > 0
 			failCount = 0
 			if wasFailing || (healthLogInterval > 0 && time.Since(lastSuccessLog) >= healthLogInterval) {
-				log.Printf("状态检查成功: 当前 IP %s 双协议可用", currentIP)
+				log.Printf("状态检查成功: 当前 IP %s %s可用", currentIP, mode.String())
 				lastSuccessLog = time.Now()
 			}
 		} else {
 			failCount++
-			log.Printf("状态检查失败 (%d/2): 当前 IP %s 双协议不可用", failCount, currentIP)
+			log.Printf("状态检查失败 (%d/2): 当前 IP %s %s不可用", failCount, currentIP, mode.String())
 		}
 
 		if failCount >= 2 {
 			log.Println("连续两次状态检查失败，切换到下一个 IP")
-			if !ipManager.switchToNextValidIP(tlsPort, httpPort, domain, code) {
+			if !ipManager.switchToNextValidIP(mode, tlsPort, httpPort, domain, code) {
 				log.Println("所有 IP 都已检查过，状态检查停止")
 				done <- true
 				return
