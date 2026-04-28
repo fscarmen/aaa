@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -26,12 +27,12 @@ const (
 )
 
 var (
-	activeConnections  int32 // 用于跟踪活跃连接的数量
-	validIPClientCache sync.Map
-	randomMu           sync.Mutex
-	randomGenerator    = rand.New(rand.NewSource(time.Now().UnixNano()))
-	verboseLog         bool
-	connLog            bool
+	activeConnections int32 // 用于跟踪活跃连接的数量
+	randomMu          sync.Mutex
+	randomGenerator   = rand.New(rand.NewSource(time.Now().UnixNano()))
+	verboseLog        bool
+	connLog           bool
+	copyBufferPool    = sync.Pool{New: func() interface{} { b := make([]byte, 32*1024); return &b }}
 )
 
 func debugf(format string, v ...interface{}) {
@@ -159,6 +160,7 @@ func main() {
 	random := flag.Bool("random", true, "是否随机生成IP，如果为false，则从CIDR中拆分出所有IP")
 	maxThreads := flag.Int("task", 100, "并发请求最大协程数")
 	healthLogInterval := flag.Int("health-log", 60, "健康检查成功日志间隔（秒），0 表示不打印成功日志")
+	gcPercent := flag.Int("gc-percent", 75, "Go GC 触发百分比，数值越低越省内存但 CPU 略高，0 表示 Go 默认值")
 	verbose := flag.Bool("verbose", false, "打印详细调试日志，包括每个 IP 的检查过程和每条候选连接")
 	logConn := flag.Bool("log-conn", false, "打印每个客户端连接的建立、协议识别和关闭日志")
 	_ = flag.Bool("tls", true, "兼容旧参数，当前版本会自动识别 TLS/非 TLS 流量")
@@ -166,6 +168,9 @@ func main() {
 	flag.Parse()
 	verboseLog = *verbose
 	connLog = *logConn
+	if *gcPercent > 0 {
+		debug.SetGCPercent(*gcPercent)
+	}
 
 	// 创建 IP 管理器
 	ipManager := NewIPManager()
@@ -363,7 +368,6 @@ func main() {
 
 		// 清空 IP 地址
 		ipManager.Clear()
-		validIPClientCache = sync.Map{}
 		log.Println("主函数将退出当前循环，因为所有 IP 都已用尽")
 	}
 }
@@ -664,16 +668,8 @@ func incrementIP(ip net.IP) {
 	}
 }
 
-func generateTargets(ip string, port int, num int) []string {
-	targets := make([]string, num)
-	address := ip
-	if strings.Contains(ip, ":") {
-		address = fmt.Sprintf("[%s]", ip)
-	}
-	for i := 0; i < num; i++ {
-		targets[i] = fmt.Sprintf("%s:%d", address, port)
-	}
-	return targets
+func formatTarget(ip string, port int) string {
+	return net.JoinHostPort(ip, fmt.Sprintf("%d", port))
 }
 
 func splitDomainPath(domain string) (string, string) {
@@ -752,7 +748,7 @@ func checkTLSIP(ip string, tlsPort int, domain string, code int) bool {
 		debugf("IP %s 未通过 TLS 检查", ip)
 		return false
 	}
-	log.Printf("TLS 可用 IP: %s (TLS:%d)", ip, tlsPort)
+	log.Printf("可用 IP: %s (健康检查端口:%d)", ip, tlsPort)
 	return true
 }
 
@@ -784,12 +780,12 @@ func statusCheck(ctx context.Context, tlsPort int, done chan bool, domain string
 			wasFailing := failCount > 0
 			failCount = 0
 			if wasFailing || (healthLogInterval > 0 && time.Since(lastSuccessLog) >= healthLogInterval) {
-				log.Printf("状态检查成功: 当前 IP %s TLS可用", currentIP)
+				log.Printf("状态检查成功: 当前 IP %s 可用", currentIP)
 				lastSuccessLog = time.Now()
 			}
 		} else {
 			failCount++
-			log.Printf("状态检查失败 (%d/2): 当前 IP %s TLS不可用", failCount, currentIP)
+			log.Printf("状态检查失败 (%d/2): 当前 IP %s 暂不可用", failCount, currentIP)
 		}
 
 		if failCount >= 2 {
@@ -860,65 +856,59 @@ func handleConnection(conn net.Conn, ip string, tlsPort int, httpPort int, num i
 	connf("识别客户端协议: %s，转发到 IP: %s 端口: %d", protocolName, ip, targetPort)
 
 	clientConn := &prefixedConn{Conn: conn, prefix: first}
-	forwardAddrs := generateTargets(ip, targetPort, num)
+	targetAddr := formatTarget(ip, targetPort)
 
 	type connResult struct {
-		conn   net.Conn
-		addr   string
-		delay  time.Duration
-		errMsg string
+		conn  net.Conn
+		delay time.Duration
+		err   error
 	}
 
-	results := make(chan connResult, len(forwardAddrs))
-	for _, addr := range forwardAddrs {
-		go func(targetAddr string) {
+	results := make(chan connResult, num)
+	for i := 0; i < num; i++ {
+		go func() {
 			start := time.Now()
 			forwardConn, err := net.DialTimeout("tcp", targetAddr, delay)
-			elapsed := time.Since(start)
-			if err != nil {
-				results <- connResult{nil, targetAddr, elapsed, fmt.Sprintf("连接到 %s 的延迟超过有效值 %d ms", targetAddr, delay.Milliseconds())}
-				return
-			}
-			results <- connResult{forwardConn, targetAddr, elapsed, ""}
-		}(addr)
+			results <- connResult{conn: forwardConn, delay: time.Since(start), err: err}
+		}()
 	}
 
-	var validConns []connResult
 	var bestConn net.Conn
 	var bestDelay time.Duration
-	var bestAddr string
-	for i := 0; i < len(forwardAddrs); i++ {
+	for i := 0; i < num; i++ {
 		res := <-results
-		if res.conn != nil {
-			validConns = append(validConns, res)
-			if bestConn == nil || res.delay < bestDelay {
-				if bestConn != nil {
-					bestConn.Close()
-				}
-				bestConn = res.conn
-				bestDelay = res.delay
-				bestAddr = res.addr
-			} else {
-				res.conn.Close()
-			}
-		} else {
-			debugf("错误: %s", res.errMsg)
+		if res.err != nil || res.conn == nil {
+			debugf("连接到 %s 超时或失败: %v", targetAddr, res.err)
+			continue
 		}
-	}
 
-	if verboseLog {
-		log.Println("符合要求的连接:")
-		for _, vc := range validConns {
-			log.Printf("地址: %s 延迟: %d ms", vc.addr, vc.delay.Milliseconds())
+		if verboseLog {
+			log.Printf("候选连接: %s 延迟: %d ms", targetAddr, res.delay.Milliseconds())
+		}
+
+		if bestConn == nil || res.delay < bestDelay {
+			if bestConn != nil {
+				bestConn.Close()
+			}
+			bestConn = res.conn
+			bestDelay = res.delay
+		} else {
+			res.conn.Close()
 		}
 	}
 
 	if bestConn != nil {
-		connf("选择最佳连接: 地址: %s 延迟: %d ms", bestAddr, bestDelay.Milliseconds())
+		connf("选择最佳连接: 地址: %s 延迟: %d ms", targetAddr, bestDelay.Milliseconds())
 		pipeConnections(clientConn, bestConn)
 	} else {
-		log.Println("未找到符合延迟要求的连接，关闭客户端连接")
+		debugf("未找到符合延迟要求的连接，关闭客户端连接")
 	}
+}
+
+func pipeWithPool(dst, src net.Conn) {
+	bufPtr := copyBufferPool.Get().(*[]byte)
+	defer copyBufferPool.Put(bufPtr)
+	_, _ = io.CopyBuffer(dst, src, *bufPtr)
 }
 
 func pipeConnections(src, dst net.Conn) {
@@ -935,13 +925,13 @@ func pipeConnections(src, dst net.Conn) {
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(src, dst)
+		pipeWithPool(src, dst)
 		closeBoth()
 	}()
 
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		pipeWithPool(dst, src)
 		closeBoth()
 	}()
 
