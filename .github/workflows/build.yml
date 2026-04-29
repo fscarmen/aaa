@@ -1,4 +1,4 @@
-name: Build cfnat C
+name: Build cfnat C multi-platform
 
 on:
   push:
@@ -10,16 +10,14 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-linux:
     name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
     continue-on-error: ${{ matrix.experimental || false }}
-
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Native / x86
           - name: linux-amd64
             artifact: cfnat-linux-amd64
             packages: gcc libc6-dev
@@ -27,7 +25,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-386
             artifact: cfnat-linux-386
             packages: gcc-i686-linux-gnu libc6-dev-i386-cross
@@ -35,8 +32,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
-          # ARM
           - name: linux-armv5
             artifact: cfnat-linux-armv5
             packages: gcc-arm-linux-gnueabi libc6-dev-armel-cross
@@ -44,9 +39,6 @@ jobs:
             cflags: "-march=armv5te"
             ldflags: "-static"
             use_zig: false
-
-          # armv6 hard-float: add -marm, otherwise GCC may enter Thumb-1 and fail with:
-          # sorry, unimplemented: Thumb-1 'hard-float' VFP ABI
           - name: linux-armv6
             artifact: cfnat-linux-armv6
             packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
@@ -54,7 +46,6 @@ jobs:
             cflags: "-marm -march=armv6 -mfpu=vfp -mfloat-abi=hard"
             ldflags: "-static"
             use_zig: false
-
           - name: linux-armv7
             artifact: cfnat-linux-armv7
             packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
@@ -62,7 +53,6 @@ jobs:
             cflags: "-marm -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
             ldflags: "-static"
             use_zig: false
-
           - name: linux-arm64
             artifact: cfnat-linux-arm64
             packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
@@ -70,8 +60,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
-          # MIPS
           - name: linux-mips
             artifact: cfnat-linux-mips
             packages: gcc-mips-linux-gnu libc6-dev-mips-cross
@@ -79,7 +67,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-mipsel
             artifact: cfnat-linux-mipsel
             packages: gcc-mipsel-linux-gnu libc6-dev-mipsel-cross
@@ -87,7 +74,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-mips64
             artifact: cfnat-linux-mips64
             packages: gcc-mips64-linux-gnuabi64 libc6-dev-mips64-cross
@@ -95,7 +81,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-mips64el
             artifact: cfnat-linux-mips64el
             packages: gcc-mips64el-linux-gnuabi64 libc6-dev-mips64el-cross
@@ -103,8 +88,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
-          # PowerPC
           - name: linux-ppc64
             artifact: cfnat-linux-ppc64
             packages: gcc-powerpc64-linux-gnu libc6-dev-ppc64-cross
@@ -112,7 +95,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-ppc64le
             artifact: cfnat-linux-ppc64le
             packages: gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross
@@ -120,8 +102,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
-          # Other Linux ports
           - name: linux-riscv64
             artifact: cfnat-linux-riscv64
             packages: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
@@ -129,7 +109,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
           - name: linux-s390x
             artifact: cfnat-linux-s390x
             packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
@@ -137,9 +116,6 @@ jobs:
             cflags: ""
             ldflags: "-static"
             use_zig: false
-
-          # Ubuntu 24.04 does not provide gcc-loongarch64-linux-gnu.
-          # Build loongarch64 with Zig cc instead of apt cross-gcc.
           - name: linux-loongarch64
             artifact: cfnat-linux-loongarch64
             packages: ""
@@ -149,14 +125,10 @@ jobs:
             ldflags: "-static"
             use_zig: true
             experimental: true
-
     env:
       SOURCE_FILE: cfnat.c
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
+      - uses: actions/checkout@v6
       - name: Install cross compiler
         if: ${{ !matrix.use_zig }}
         shell: bash
@@ -164,13 +136,11 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ matrix.packages }} file ca-certificates
-
       - name: Setup Zig for loongarch64
         if: ${{ matrix.use_zig }}
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
-
       - name: Install common tools for Zig build
         if: ${{ matrix.use_zig }}
         shell: bash
@@ -178,58 +148,111 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends file ca-certificates
-
-      - name: Build with GCC
-        if: ${{ !matrix.use_zig }}
+      - name: Build Linux
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-
-          if [ ! -f "$SOURCE_FILE" ]; then
-            echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2
-            exit 1
+          if [ ! -f "$SOURCE_FILE" ]; then echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2; exit 1; fi
+          if [ "${{ matrix.use_zig }}" = "true" ]; then
+            zig cc -target ${{ matrix.zig_target }} -O2 -pipe -std=c11 \
+              -Wall -Wextra -Wno-unused-parameter ${{ matrix.cflags }} \
+              "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
+              -pthread ${{ matrix.ldflags }} -s
+          else
+            ${{ matrix.cc }} -O2 -pipe -std=c11 \
+              -Wall -Wextra -Wno-unused-parameter ${{ matrix.cflags }} \
+              "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
+              -pthread ${{ matrix.ldflags }} -s
           fi
+          chmod +x "dist/${{ matrix.artifact }}"
+          file "dist/${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          archive: false
 
-          echo "Building ${{ matrix.artifact }} from $SOURCE_FILE"
+  build-windows:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-amd64
+            artifact: cfnat-windows-amd64.exe
+            packages: gcc-mingw-w64-x86-64
+            cc: x86_64-w64-mingw32-gcc
+          - name: windows-386
+            artifact: cfnat-windows-386.exe
+            packages: gcc-mingw-w64-i686
+            cc: i686-w64-mingw32-gcc
+    env:
+      SOURCE_FILE: cfnat_windows.c
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install MinGW-w64
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }} file ca-certificates
+      - name: Build Windows Win7+
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ ! -f "$SOURCE_FILE" ]; then echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2; exit 1; fi
           ${{ matrix.cc }} \
-            -O2 -pipe -std=c11 \
+            -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
             -Wall -Wextra -Wno-unused-parameter \
-            ${{ matrix.cflags }} \
-            "$SOURCE_FILE" \
-            -o "dist/${{ matrix.artifact }}" \
-            -pthread ${{ matrix.ldflags }} -s
-
-          chmod +x "dist/${{ matrix.artifact }}"
+            "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
+            -lws2_32 -lwinpthread -static -s
           file "dist/${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          archive: false
 
-      - name: Build with Zig cc
-        if: ${{ matrix.use_zig }}
+  build-macos:
+    name: Build ${{ matrix.name }}
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-amd64
+            artifact: cfnat-darwin-amd64
+            arch: x86_64
+            minver: "10.13"
+          - name: macos-arm64
+            artifact: cfnat-darwin-arm64
+            arch: arm64
+            minver: "11.0"
+    env:
+      SOURCE_FILE: cfnat_macos.c
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build macOS
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-
-          if [ ! -f "$SOURCE_FILE" ]; then
-            echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2
-            exit 1
-          fi
-
-          echo "Building ${{ matrix.artifact }} from $SOURCE_FILE with Zig target ${{ matrix.zig_target }}"
-          zig cc \
-            -target ${{ matrix.zig_target }} \
+          if [ ! -f "$SOURCE_FILE" ]; then echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2; exit 1; fi
+          clang \
             -O2 -pipe -std=c11 \
             -Wall -Wextra -Wno-unused-parameter \
-            ${{ matrix.cflags }} \
-            "$SOURCE_FILE" \
-            -o "dist/${{ matrix.artifact }}" \
-            -pthread ${{ matrix.ldflags }} -s
-
+            -arch ${{ matrix.arch }} -mmacosx-version-min=${{ matrix.minver }} \
+            "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
+            -pthread
+          strip "dist/${{ matrix.artifact }}" || true
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -238,37 +261,31 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
           path: dist
-
       - name: Flatten artifacts and chmod
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
-
           find dist -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
             name="$(basename "$file")"
             cp "$file" "release/$name"
-            chmod +x "release/$name"
+            case "$name" in *.exe) ;; *) chmod +x "release/$name" ;; esac
           done
-
           ls -lh release
-
       - name: Create checksums
         shell: bash
         run: |
           set -euo pipefail
           cd release
           sha256sum * > sha256sums.txt
-
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@v3
         with:
