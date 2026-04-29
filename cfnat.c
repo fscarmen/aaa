@@ -20,6 +20,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef CFNAT_GLOBAL_SIGNAL_STATE_DECLARED
+#define CFNAT_GLOBAL_SIGNAL_STATE_DECLARED
+static atomic_int g_interrupted = 0;
+static int g_listen_fd = -1;
+#endif
+
 #define MAX_IP_LEN 64
 #define MAX_COLO_LEN 8
 #define MAX_REGION_LEN 64
@@ -94,7 +100,11 @@ static void parse_args(Config *c, int argc, char **argv) {
     for(int i=1;i<argc;i++){ char *arg=argv[i]; if(!strcmp(arg,"-h")||!strcmp(arg,"--help")){usage(argv[0]);exit(0);} if(arg[0]!='-') continue; char *key=arg+1; if(*key=='-') key++; char *eq=strchr(key,'='); char *val=NULL; if(eq){*eq=0;val=eq+1;} else if(i+1<argc && argv[i+1][0]!='-') val=argv[++i];
         if(!strcmp(key,"addr")&&val) snprintf(c->addr,sizeof(c->addr),"%s",val); else if(!strcmp(key,"code")&&val) c->code=atoi(val); else if(!strcmp(key,"colo")&&val) snprintf(c->colo,sizeof(c->colo),"%s",val); else if(!strcmp(key,"delay")&&val) c->delay_ms=atoi(val); else if(!strcmp(key,"domain")&&val) snprintf(c->domain,sizeof(c->domain),"%s",val); else if(!strcmp(key,"ipnum")&&val) c->ipnum=atoi(val); else if(!strcmp(key,"ips")&&val) c->ips_type=atoi(val); else if(!strcmp(key,"num")&&val) c->num=atoi(val); else if(!strcmp(key,"port")&&val) c->port=atoi(val); else if(!strcmp(key,"http-port")&&val) c->http_port=atoi(val); else if(!strcmp(key,"random")) c->random_mode=parse_bool(val); else if(!strcmp(key,"task")&&val) c->task=atoi(val); else if(!strcmp(key,"health-log")&&val) c->health_log=atoi(val); else if(!strcmp(key,"verbose")) c->verbose=parse_bool(val); else if(!strcmp(key,"log-conn")) c->log_conn=parse_bool(val);
     }
-    if(c->delay_ms<=0)c->delay_ms=300; if(c->ipnum<=0)c->ipnum=20; if(c->num<=0)c->num=1; if(c->task<=0)c->task=1; if(c->task>512)c->task=512;
+    if(c->delay_ms<=0)c->delay_ms=300;
+    if(c->ipnum<=0)c->ipnum=20;
+    if(c->num<=0)c->num=1;
+    if(c->task<=0)c->task=1;
+    if(c->task>512)c->task=512;
 }
 static int file_exists(const char *path){struct stat st; return stat(path,&st)==0 && S_ISREG(st.st_mode);} 
 static int download_file_from_urls(const char **urls,const char *filename){char tmp[256];snprintf(tmp,sizeof(tmp),"%s.tmp",filename);for(int i=0;urls[i];i++){char cmd[1024];snprintf(cmd,sizeof(cmd),"curl -fsSL '%s' -o '%s' 2>/dev/null || wget -qO '%s' '%s' 2>/dev/null",urls[i],tmp,tmp,urls[i]);int rc=system(cmd);if(rc==0&&file_exists(tmp)){rename(tmp,filename);return 0;}unlink(tmp);log_msg("从 %s 下载失败，尝试下一个源",urls[i]);}return -1;}
