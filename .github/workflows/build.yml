@@ -1,63 +1,172 @@
 name: Build cfnat C
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build:
+    name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental || false }}
 
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Native / x86
           - name: linux-amd64
-            cc: gcc
             artifact: cfnat-linux-amd64
-            packages: ""
-            cflags: "-O2 -Wall -Wextra -std=c11 -static"
+            packages: gcc libc6-dev
+            cc: gcc
+            cflags: ""
+            ldflags: "-static"
 
-          - name: linux-arm64
-            cc: aarch64-linux-gnu-gcc
-            artifact: cfnat-linux-arm64
-            packages: "gcc-aarch64-linux-gnu"
-            cflags: "-O2 -Wall -Wextra -std=c11 -static"
+          - name: linux-386
+            artifact: cfnat-linux-386
+            packages: gcc-i686-linux-gnu libc6-dev-i386-cross
+            cc: i686-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          # ARM
+          - name: linux-armv5
+            artifact: cfnat-linux-armv5
+            packages: gcc-arm-linux-gnueabi libc6-dev-armel-cross
+            cc: arm-linux-gnueabi-gcc
+            cflags: "-march=armv5te"
+            ldflags: "-static"
+
+          - name: linux-armv6
+            artifact: cfnat-linux-armv6
+            packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+            cc: arm-linux-gnueabihf-gcc
+            cflags: "-march=armv6 -mfpu=vfp -mfloat-abi=hard"
+            ldflags: "-static"
 
           - name: linux-armv7
-            cc: arm-linux-gnueabihf-gcc
             artifact: cfnat-linux-armv7
-            packages: "gcc-arm-linux-gnueabihf"
-            cflags: "-O2 -Wall -Wextra -std=c11 -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -static"
+            packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+            cc: arm-linux-gnueabihf-gcc
+            cflags: "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
+            ldflags: "-static"
+
+          - name: linux-arm64
+            artifact: cfnat-linux-arm64
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            cc: aarch64-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          # MIPS
+          - name: linux-mips
+            artifact: cfnat-linux-mips
+            packages: gcc-mips-linux-gnu libc6-dev-mips-cross
+            cc: mips-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          - name: linux-mipsel
+            artifact: cfnat-linux-mipsel
+            packages: gcc-mipsel-linux-gnu libc6-dev-mipsel-cross
+            cc: mipsel-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          - name: linux-mips64
+            artifact: cfnat-linux-mips64
+            packages: gcc-mips64-linux-gnuabi64 libc6-dev-mips64-cross
+            cc: mips64-linux-gnuabi64-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          - name: linux-mips64el
+            artifact: cfnat-linux-mips64el
+            packages: gcc-mips64el-linux-gnuabi64 libc6-dev-mips64el-cross
+            cc: mips64el-linux-gnuabi64-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          # PowerPC
+          - name: linux-ppc64
+            artifact: cfnat-linux-ppc64
+            packages: gcc-powerpc64-linux-gnu libc6-dev-ppc64-cross
+            cc: powerpc64-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          - name: linux-ppc64le
+            artifact: cfnat-linux-ppc64le
+            packages: gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross
+            cc: powerpc64le-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          # Other Linux ports
+          - name: linux-riscv64
+            artifact: cfnat-linux-riscv64
+            packages: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+            cc: riscv64-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          - name: linux-s390x
+            artifact: cfnat-linux-s390x
+            packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
+            cc: s390x-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+
+          # Optional: depends on ubuntu-latest repository support.
+          - name: linux-loongarch64
+            artifact: cfnat-linux-loongarch64
+            packages: gcc-loongarch64-linux-gnu libc6-dev-loong64-cross
+            cc: loongarch64-linux-gnu-gcc
+            cflags: ""
+            ldflags: "-static"
+            experimental: true
+
+    env:
+      SOURCE_FILE: cfnat.c
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Install cross compiler
-        if: matrix.packages != ''
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.packages }}
+          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }} file ca-certificates
 
       - name: Build
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          ${{ matrix.cc }} ${{ matrix.cflags }} -pthread -s -o dist/${{ matrix.artifact }} cfnat.c
-          chmod +x dist/${{ matrix.artifact }}
-          file dist/${{ matrix.artifact }}
 
-          if file dist/${{ matrix.artifact }} | grep -qi "dynamically linked"; then
-            echo "ERROR: dist/${{ matrix.artifact }} is dynamically linked"
+          if [ ! -f "$SOURCE_FILE" ]; then
+            echo "SOURCE_FILE '$SOURCE_FILE' not found" >&2
             exit 1
           fi
+
+          echo "Building ${{ matrix.artifact }} from $SOURCE_FILE"
+          ${{ matrix.cc }} \
+            -O2 -pipe -std=c11 -D_GNU_SOURCE \
+            -Wall -Wextra -Wno-unused-parameter \
+            ${{ matrix.cflags }} \
+            "$SOURCE_FILE" \
+            -o "dist/${{ matrix.artifact }}" \
+            -pthread ${{ matrix.ldflags }} -s
+
+          chmod +x "dist/${{ matrix.artifact }}"
+          file "dist/${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -65,11 +174,13 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
+          archive: false
 
   release:
-    runs-on: ubuntu-latest
+    name: Publish release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
 
     steps:
       - name: Download artifacts
@@ -77,19 +188,26 @@ jobs:
         with:
           path: dist
 
-      - name: Prepare release files
+      - name: Flatten artifacts and chmod
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
-          find dist -type f -print0 | while IFS= read -r -d '' f; do
-            name="$(basename "$f")"
-            cp "$f" "release/$name"
+
+          find dist -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
+            name="$(basename "$file")"
+            cp "$file" "release/$name"
             chmod +x "release/$name"
           done
+
+          ls -lh release
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
           cd release
           sha256sum * > sha256sums.txt
-          ls -lh
 
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@v3
