@@ -20,12 +20,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef CFNAT_GLOBAL_SIGNAL_STATE_DECLARED
-#define CFNAT_GLOBAL_SIGNAL_STATE_DECLARED
-static atomic_int g_interrupted = 0;
-static int g_listen_fd = -1;
-#endif
-
 #define MAX_IP_LEN 64
 #define MAX_COLO_LEN 8
 #define MAX_REGION_LEN 64
@@ -71,6 +65,7 @@ static char g_current_ip[MAX_IP_LEN] = {0};
 static pthread_mutex_t g_ip_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int g_running = 1;
 static atomic_int g_active_connections = 0;
+static int g_listen_fd = -1;
 
 static long now_ms(void) { struct timeval tv; gettimeofday(&tv, NULL); return (long)tv.tv_sec * 1000L + tv.tv_usec / 1000L; }
 static void vlog_line(const char *fmt, va_list ap) { time_t t=time(NULL); struct tm tmv; localtime_r(&t,&tmv); char ts[32]; strftime(ts,sizeof(ts),"%Y/%m/%d %H:%M:%S",&tmv); fprintf(stderr,"%s ",ts); vfprintf(stderr,fmt,ap); fputc('\n',stderr); }
@@ -100,11 +95,7 @@ static void parse_args(Config *c, int argc, char **argv) {
     for(int i=1;i<argc;i++){ char *arg=argv[i]; if(!strcmp(arg,"-h")||!strcmp(arg,"--help")){usage(argv[0]);exit(0);} if(arg[0]!='-') continue; char *key=arg+1; if(*key=='-') key++; char *eq=strchr(key,'='); char *val=NULL; if(eq){*eq=0;val=eq+1;} else if(i+1<argc && argv[i+1][0]!='-') val=argv[++i];
         if(!strcmp(key,"addr")&&val) snprintf(c->addr,sizeof(c->addr),"%s",val); else if(!strcmp(key,"code")&&val) c->code=atoi(val); else if(!strcmp(key,"colo")&&val) snprintf(c->colo,sizeof(c->colo),"%s",val); else if(!strcmp(key,"delay")&&val) c->delay_ms=atoi(val); else if(!strcmp(key,"domain")&&val) snprintf(c->domain,sizeof(c->domain),"%s",val); else if(!strcmp(key,"ipnum")&&val) c->ipnum=atoi(val); else if(!strcmp(key,"ips")&&val) c->ips_type=atoi(val); else if(!strcmp(key,"num")&&val) c->num=atoi(val); else if(!strcmp(key,"port")&&val) c->port=atoi(val); else if(!strcmp(key,"http-port")&&val) c->http_port=atoi(val); else if(!strcmp(key,"random")) c->random_mode=parse_bool(val); else if(!strcmp(key,"task")&&val) c->task=atoi(val); else if(!strcmp(key,"health-log")&&val) c->health_log=atoi(val); else if(!strcmp(key,"verbose")) c->verbose=parse_bool(val); else if(!strcmp(key,"log-conn")) c->log_conn=parse_bool(val);
     }
-    if(c->delay_ms<=0)c->delay_ms=300;
-    if(c->ipnum<=0)c->ipnum=20;
-    if(c->num<=0)c->num=1;
-    if(c->task<=0)c->task=1;
-    if(c->task>512)c->task=512;
+    if(c->delay_ms<=0)c->delay_ms=300; if(c->ipnum<=0)c->ipnum=20; if(c->num<=0)c->num=1; if(c->task<=0)c->task=1; if(c->task>512)c->task=512;
 }
 static int file_exists(const char *path){struct stat st; return stat(path,&st)==0 && S_ISREG(st.st_mode);} 
 static int download_file_from_urls(const char **urls,const char *filename){char tmp[256];snprintf(tmp,sizeof(tmp),"%s.tmp",filename);for(int i=0;urls[i];i++){char cmd[1024];snprintf(cmd,sizeof(cmd),"curl -fsSL '%s' -o '%s' 2>/dev/null || wget -qO '%s' '%s' 2>/dev/null",urls[i],tmp,tmp,urls[i]);int rc=system(cmd);if(rc==0&&file_exists(tmp)){rename(tmp,filename);return 0;}unlink(tmp);log_msg("从 %s 下载失败，尝试下一个源",urls[i]);}return -1;}
@@ -135,10 +126,28 @@ static void close_pair(int a,int b){shutdown(a,SHUT_RDWR);shutdown(b,SHUT_RDWR);
 static void* pipe_worker(void*arg){PipeCtx*pc=(PipeCtx*)arg;char buf[COPY_BUF_SIZE];while(1){ssize_t n=recv(pc->from,buf,sizeof(buf),0);if(n<=0)break;char*p=buf;ssize_t left=n;while(left>0){ssize_t w=send(pc->to,p,(size_t)left,0);if(w<=0)goto done;p+=w;left-=w;}}done:close_pair(pc->from,pc->to);return NULL;} 
 static int create_small_thread(pthread_t*tid,void*(*fn)(void*),void*arg){pthread_attr_t attr;pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,64*1024);int rc=pthread_create(tid,&attr,fn,arg);pthread_attr_destroy(&attr);return rc;} 
 static int relay_bidirectional(int c,int u){pthread_t t1,t2;PipeCtx a={c,u},b={u,c};create_small_thread(&t1,pipe_worker,&a);create_small_thread(&t2,pipe_worker,&b);pthread_join(t1,NULL);pthread_join(t2,NULL);return 0;} 
-static void* connection_thread(void*arg){ConnCtx*cc=(ConnCtx*)arg;int client=cc->client_fd;struct timeval io_tv;io_tv.tv_sec=10;io_tv.tv_usec=0;setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&io_tv,sizeof(io_tv));setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,&io_tv,sizeof(io_tv));unsigned char first=0;ssize_t n=recv(client,&first,1,0);if(n<=0)goto out;int is_tls=first==0x16;int target_port=is_tls?cc->tls_port:cc->http_port;conn_msg("识别客户端协议: %s，转发到 IP: %s 端口: %d",is_tls?"TLS":"非 TLS",cc->ip,target_port);int upstream=-1,best=0;for(int i=0;i<cc->num;i++){int lat=0;int fd=tcp_connect(cc->ip,target_port,cc->delay_ms,&lat);if(fd>=0){upstream=fd;best=lat;break;}}if(upstream<0){debug_msg("未找到符合延迟要求的连接，关闭客户端连接");goto out;}setsockopt(upstream,SOL_SOCKET,SO_RCVTIMEO,&io_tv,sizeof(io_tv));setsockopt(upstream,SOL_SOCKET,SO_SNDTIMEO,&io_tv,sizeof(io_tv));send(upstream,&first,1,0);conn_msg("选择连接: 地址: %s:%d 延迟: %d ms",cc->ip,target_port,best);relay_bidirectional(client,upstream);close(upstream);out:close(client);int active=atomic_fetch_sub(&g_active_connections,1)-1;conn_msg("客户端连接关闭，当前活跃连接数: %d",active);free(cc);return NULL;} 
+static void* connection_thread(void*arg){ConnCtx*cc=(ConnCtx*)arg;int client=cc->client_fd;unsigned char first=0;ssize_t n=recv(client,&first,1,0);if(n<=0)goto out;int is_tls=first==0x16;int target_port=is_tls?cc->tls_port:cc->http_port;conn_msg("识别客户端协议: %s，转发到 IP: %s 端口: %d",is_tls?"TLS":"非 TLS",cc->ip,target_port);int upstream=-1,best=0;for(int i=0;i<cc->num;i++){int lat=0;int fd=tcp_connect(cc->ip,target_port,cc->delay_ms,&lat);if(fd>=0){upstream=fd;best=lat;break;}}if(upstream<0){debug_msg("未找到符合延迟要求的连接，关闭客户端连接");goto out;}send(upstream,&first,1,0);conn_msg("选择连接: 地址: %s:%d 延迟: %d ms",cc->ip,target_port,best);relay_bidirectional(client,upstream);close(upstream);out:close(client);int active=atomic_fetch_sub(&g_active_connections,1)-1;conn_msg("客户端连接关闭，当前活跃连接数: %d",active);free(cc);return NULL;} 
 static int parse_addr(const char*addr,char*host,size_t hostsz,int*port){const char*colon=strrchr(addr,':');if(!colon)return-1;size_t n=(size_t)(colon-addr);if(n>=hostsz)n=hostsz-1;memcpy(host,addr,n);host[n]=0;*port=atoi(colon+1);if(!host[0])snprintf(host,hostsz,"0.0.0.0");return *port>0?0:-1;} 
 static int listen_tcp(const char*addr){char host[128];int port=0;if(parse_addr(addr,host,sizeof(host),&port)!=0)return-1;int fd=socket(AF_INET,SOCK_STREAM,0);if(fd<0)return-1;int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));struct sockaddr_in sa;memset(&sa,0,sizeof(sa));sa.sin_family=AF_INET;sa.sin_port=htons((uint16_t)port);if(inet_pton(AF_INET,host,&sa.sin_addr)!=1){close(fd);return-1;}if(bind(fd,(struct sockaddr*)&sa,sizeof(sa))!=0){close(fd);return-1;}if(listen(fd,1024)!=0){close(fd);return-1;}return fd;} 
-static void on_signal(int sig){(void)sig;atomic_store(&g_interrupted,1);atomic_store(&g_running,0);if(g_listen_fd>=0){shutdown(g_listen_fd,SHUT_RDWR);close(g_listen_fd);g_listen_fd=-1;}} 
-int main(int argc,char**argv){parse_args(&g_cfg,argc,argv);struct sigaction sa;memset(&sa,0,sizeof(sa));sa.sa_handler=on_signal;sigemptyset(&sa.sa_mask);sa.sa_flags=0;sigaction(SIGINT,&sa,NULL);sigaction(SIGTERM,&sa,NULL);signal(SIGPIPE,SIG_IGN);const char*ipfile=g_cfg.ips_type==6?"ips-v6.txt":"ips-v4.txt";const char**urls=g_cfg.ips_type==6?IPS_V6_URLS:IPS_V4_URLS;if(!file_exists(ipfile)){printf("文件 %s 不存在，正在下载数据\n",ipfile);if(download_file_from_urls(urls,ipfile)!=0){log_msg("下载 %s 失败",ipfile);return 1;}}log_msg("正在加载 locations.json");
+static void on_signal(int sig){
+    (void)sig;
+    atomic_store(&g_running,0);
+    if(g_listen_fd>=0){
+        close(g_listen_fd);
+        g_listen_fd=-1;
+    }
+}
+static void install_signals(void){
+    struct sigaction sa;
+    memset(&sa,0,sizeof(sa));
+    sa.sa_handler=on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags=0;
+    sigaction(SIGINT,&sa,NULL);
+    sigaction(SIGTERM,&sa,NULL);
+    signal(SIGPIPE,SIG_IGN);
+}
+
+int main(int argc,char**argv){parse_args(&g_cfg,argc,argv);install_signals();const char*ipfile=g_cfg.ips_type==6?"ips-v6.txt":"ips-v4.txt";const char**urls=g_cfg.ips_type==6?IPS_V6_URLS:IPS_V4_URLS;if(!file_exists(ipfile)){printf("文件 %s 不存在，正在下载数据\n",ipfile);if(download_file_from_urls(urls,ipfile)!=0){log_msg("下载 %s 失败",ipfile);return 1;}}log_msg("正在加载 locations.json");
     load_locations();
-    log_msg("locations 加载完成: %zu 条", g_location_count);StringList ips=load_ip_list(ipfile,g_cfg.random_mode);if(ips.len==0){log_msg("没有可扫描的 IP");return 1;}long start=now_ms();ResultList results=scan_ips(&ips,&g_cfg);if(results.len==0){log_msg("未发现有效IP，可尝试放宽 -delay 或开启 -verbose=true 查看细节");strlist_free(&ips);return 1;}printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟\n");for(size_t i=0;i<results.len;i++)printf("%s | %s | %s | %s | %d ms\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms);printf("成功提取 %zu 个有效IP，耗时 %ld秒\n",results.len,(now_ms()-start)/1000);g_candidates=results.items;g_candidate_count=results.len;if(!select_valid_ip()){log_msg("没有有效的 IP 可用");strlist_free(&ips);free(results.items);return 1;}int lfd=listen_tcp(g_cfg.addr);g_listen_fd=lfd;if(lfd<0){log_msg("无法监听 %s: %s",g_cfg.addr,strerror(errno));strlist_free(&ips);free(results.items);return 1;}log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms);pthread_t ht;create_small_thread(&ht,health_thread,NULL);pthread_detach(ht);while(atomic_load(&g_running)){fd_set rfds;FD_ZERO(&rfds);FD_SET(lfd,&rfds);struct timeval tv;tv.tv_sec=1;tv.tv_usec=0;int ready=select(lfd+1,&rfds,NULL,NULL,&tv);if(!atomic_load(&g_running))break;if(ready<0){if(errno==EINTR)continue;break;}if(ready==0)continue;struct sockaddr_storage ss;socklen_t slen=sizeof(ss);int cfd=accept(lfd,(struct sockaddr*)&ss,&slen);if(cfd<0){if(errno==EINTR)continue;if(!atomic_load(&g_running))break;continue;}char ip[MAX_IP_LEN];get_current_ip(ip,sizeof(ip));if(!ip[0]){close(cfd);continue;}int active=atomic_fetch_add(&g_active_connections,1)+1;conn_msg("客户端连接建立，当前活跃连接数: %d",active);ConnCtx*cc=calloc(1,sizeof(ConnCtx));if(!cc){close(cfd);atomic_fetch_sub(&g_active_connections,1);continue;}cc->client_fd=cfd;snprintf(cc->ip,sizeof(cc->ip),"%s",ip);cc->tls_port=g_cfg.port;cc->http_port=g_cfg.http_port;cc->num=g_cfg.num;cc->delay_ms=g_cfg.delay_ms;pthread_t tid;create_small_thread(&tid,connection_thread,cc);pthread_detach(tid);}if(g_listen_fd>=0){close(g_listen_fd);g_listen_fd=-1;}if(atomic_load(&g_interrupted))log_msg("收到退出信号，程序已停止");strlist_free(&ips);free(results.items);free(g_locations);return 0;}
+    log_msg("locations 加载完成: %zu 条", g_location_count);StringList ips=load_ip_list(ipfile,g_cfg.random_mode);if(ips.len==0){log_msg("没有可扫描的 IP");return 1;}long start=now_ms();ResultList results=scan_ips(&ips,&g_cfg);if(results.len==0){log_msg("未发现有效IP，可尝试放宽 -delay 或开启 -verbose=true 查看细节");strlist_free(&ips);return 1;}printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟\n");for(size_t i=0;i<results.len;i++)printf("%s | %s | %s | %s | %d ms\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms);printf("成功提取 %zu 个有效IP，耗时 %ld秒\n",results.len,(now_ms()-start)/1000);g_candidates=results.items;g_candidate_count=results.len;if(!select_valid_ip()){log_msg("没有有效的 IP 可用");strlist_free(&ips);free(results.items);return 1;}int lfd=listen_tcp(g_cfg.addr);if(lfd<0){log_msg("无法监听 %s: %s",g_cfg.addr,strerror(errno));strlist_free(&ips);free(results.items);return 1;}g_listen_fd=lfd;log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms);pthread_t ht;create_small_thread(&ht,health_thread,NULL);while(atomic_load(&g_running)){struct sockaddr_storage ss;socklen_t slen=sizeof(ss);int cfd=accept(lfd,(struct sockaddr*)&ss,&slen);if(cfd<0){if(!atomic_load(&g_running))break;if(errno==EINTR||errno==EBADF)break;sleep(1);continue;}char ip[MAX_IP_LEN];get_current_ip(ip,sizeof(ip));if(!ip[0]){close(cfd);continue;}int active=atomic_fetch_add(&g_active_connections,1)+1;conn_msg("客户端连接建立，当前活跃连接数: %d",active);ConnCtx*cc=calloc(1,sizeof(ConnCtx));if(!cc){close(cfd);atomic_fetch_sub(&g_active_connections,1);continue;}cc->client_fd=cfd;snprintf(cc->ip,sizeof(cc->ip),"%s",ip);cc->tls_port=g_cfg.port;cc->http_port=g_cfg.http_port;cc->num=g_cfg.num;cc->delay_ms=g_cfg.delay_ms;pthread_t tid;create_small_thread(&tid,connection_thread,cc);pthread_detach(tid);}if(lfd>=0)close(lfd);g_listen_fd=-1;pthread_join(ht,NULL);strlist_free(&ips);free(results.items);free(g_locations);return 0;}
