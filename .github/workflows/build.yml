@@ -3,9 +3,6 @@ name: Build cfnat C
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
     tags:
       - "v*"
 
@@ -29,16 +26,6 @@ jobs:
             artifact: cfnat-linux-arm64
             packages: "gcc-aarch64-linux-gnu"
             cflags: "-O2 -Wall -Wextra -std=c11"
-          - name: linux-armv5
-            cc: arm-linux-gnueabi-gcc
-            artifact: cfnat-linux-armv5
-            packages: "gcc-arm-linux-gnueabi"
-            cflags: "-O2 -Wall -Wextra -std=c11 -march=armv5te"
-          - name: linux-armv6
-            cc: arm-linux-gnueabihf-gcc
-            artifact: cfnat-linux-armv6
-            packages: "gcc-arm-linux-gnueabihf"
-            cflags: "-O2 -Wall -Wextra -std=c11 -march=armv6 -mfpu=vfp -mfloat-abi=hard"
           - name: linux-armv7
             cc: arm-linux-gnueabihf-gcc
             artifact: cfnat-linux-armv7
