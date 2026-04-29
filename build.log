@@ -1,0 +1,7 @@
+cfnat.c: In function 'parse_args':
+cfnat.c:97:5: warning: this 'if' clause does not guard... [-Wmisleading-indentation]
+   97 |     if(c->delay_ms<=0)c->delay_ms=300; if(c->ipnum<=0)c->ipnum=20; if(c->num<=0)c->num=1; if(c->task<=0)c->task=1; if(c->task>512)c->task=512;
+      |     ^~
+cfnat.c:97:40: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the 'if'
+   97 |     if(c->delay_ms<=0)c->delay_ms=300; if(c->ipnum<=0)c->ipnum=20; if(c->num<=0)c->num=1; if(c->task<=0)c->task=1; if(c->task>512)c->task=512;
+      |                                        ^~
