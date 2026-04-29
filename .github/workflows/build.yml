@@ -31,6 +31,21 @@ jobs:
             artifact: cfnat-linux-armv7
             packages: "gcc-arm-linux-gnueabihf"
             cflags: "-O2 -Wall -Wextra -std=c11 -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
+          - name: linux-amd64
+            cc: gcc
+            artifact: cfnat-linux-amd64
+            packages: ""
+            cflags: "-O2 -Wall -Wextra -std=c11 -static"
+          - name: linux-arm64
+            cc: aarch64-linux-gnu-gcc
+            artifact: cfnat-linux-arm64
+            packages: "gcc-aarch64-linux-gnu"
+            cflags: "-O2 -Wall -Wextra -std=c11 -static"
+          - name: linux-armv7
+            cc: arm-linux-gnueabihf-gcc
+            artifact: cfnat-linux-armv7
+            packages: "gcc-arm-linux-gnueabihf"
+            cflags: "-O2 -Wall -Wextra -std=c11 -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -static"
 
     steps:
       - name: Checkout
