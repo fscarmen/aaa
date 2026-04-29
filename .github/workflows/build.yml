@@ -20,21 +20,6 @@ jobs:
             cc: gcc
             artifact: cfnat-linux-amd64
             packages: ""
-            cflags: "-O2 -Wall -Wextra -std=c11"
-          - name: linux-arm64
-            cc: aarch64-linux-gnu-gcc
-            artifact: cfnat-linux-arm64
-            packages: "gcc-aarch64-linux-gnu"
-            cflags: "-O2 -Wall -Wextra -std=c11"
-          - name: linux-armv7
-            cc: arm-linux-gnueabihf-gcc
-            artifact: cfnat-linux-armv7
-            packages: "gcc-arm-linux-gnueabihf"
-            cflags: "-O2 -Wall -Wextra -std=c11 -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
-          - name: linux-amd64
-            cc: gcc
-            artifact: cfnat-linux-amd64
-            packages: ""
             cflags: "-O2 -Wall -Wextra -std=c11 -static"
           - name: linux-arm64
             cc: aarch64-linux-gnu-gcc
@@ -49,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install cross compiler
         if: matrix.packages != ''
@@ -67,7 +52,7 @@ jobs:
           file dist/${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -79,7 +64,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Prepare release files
@@ -95,6 +80,6 @@ jobs:
           cd release
           sha256sum * > sha256sums.txt
       - name: Upload GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*
