@@ -36,7 +36,7 @@ Ideal for:
 - 🎨 Inverted QR body for improved visibility
 - 🔲 Configurable quiet zone
 - ⚡ Targets fully static binaries to avoid runtime loader related execution failures
-- 🌍 Linux multi-architecture artifacts via GitHub Actions
+- 🌍 Linux / macOS / Windows multi-architecture artifacts via GitHub Actions
 
 ---
 
@@ -107,11 +107,13 @@ qrencode [options] <text>
 
 ## 🧱 GitHub Actions Cross Compilation
 
-The workflow in [`release.yml`](.github/workflows/release.yml) builds inside Linux multi-architecture Alpine containers and does the following:
+The workflow in [`release.yml`](.github/workflows/release.yml) builds artifacts for the following platforms:
 
-1. Builds a static `libqrencode` from source
-2. Uses [`Makefile`](Makefile) to build the CLI with static-link preference
-3. Uploads and releases these artifacts:
+### Linux
+
+- Built in Alpine multi-architecture containers
+- Builds static `libqrencode` from source
+- Fails if the resulting binary still contains an ELF interpreter
 
 ```text
 qrencode-linux-amd64
@@ -124,10 +126,32 @@ qrencode-linux-s390x
 qrencode-linux-riscv64
 ```
 
+### macOS
+
+- Supports both Intel and Apple Silicon
+- Builds static `libqrencode` from source to reduce extra third-party runtime dependencies
+
+```text
+qrencode-macos-amd64
+qrencode-macos-arm64
+```
+
+### Windows
+
+- Supports x64 and x86
+- Uses the MSYS2 `MINGW64` / `MINGW32` environments
+- Targets Windows 7 and later through the `MSVCRT` toolchain path
+
+```text
+qrencode-windows-amd64.exe
+qrencode-windows-386.exe
+```
+
 Notes:
 
-- The workflow is Linux-only and C-only.
-- The workflow fails if the artifact still contains an ELF interpreter, preventing accidental dynamic release binaries.
+- The workflow only keeps the C-based build pipeline.
+- Linux artifacts must pass the static-link validation step.
+- Windows builds explicitly use `-D_WIN32_WINNT=0x0601` to set the minimum target to Windows 7.
 
 ---
 

@@ -3,12 +3,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#define strcasecmp _stricmp
+#else
 #include <strings.h>
+#endif
 
 #include "render.h"
 
 static void usage(void) {
-  fprintf(stderr, "USAGE: qrencode-go [options] <url>\n");
+  fprintf(stderr, "USAGE: qrencode [options] <text>\n");
   fprintf(stderr, "\n");
   fprintf(stderr, "OPTIONS:\n");
   fprintf(stderr, "  -level L/M/Q/H   Error correction level (default L)\n");
@@ -118,6 +124,10 @@ static char *trimmed_copy(const char *value) {
 
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  SetConsoleOutputCP(CP_UTF8);
+  SetConsoleCP(CP_UTF8);
+#endif
   const char *level = "L";
   int quiet_zone = 1;
   bool compact = true;

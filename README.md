@@ -35,8 +35,8 @@
 - 📏 半高压缩输出
 - 🎨 二维码本体黑白反转显示
 - 🔲 可控静区边框
-- ⚡ 通过静态链接策略尽量减少运行时依赖
-- 🌍 GitHub Actions 提供 Linux 多架构交叉编译产物
+- ⚡ 以真正静态链接为目标，避免运行时加载器缺失导致无法执行
+- 🌍 GitHub Actions 提供 Linux / macOS / Windows 多架构构建产物
 
 ---
 
@@ -50,6 +50,8 @@
 - `libqrencode`
 
 如果要静态链接构建，还需要安装 `libqrencode` 的静态库和对应开发文件。
+
+如果二进制下载后执行时报错 `No such file or directory`，通常不是文件不存在，而是 ELF 解释器或动态加载器缺失。当前工作流已改为强制产出无动态解释器的静态二进制，以避免这个问题。
 
 ---
 
@@ -105,11 +107,13 @@ qrencode [options] <text>
 
 ## 🧱 GitHub Actions 交叉编译
 
-仓库内的 [`release.yml`](.github/workflows/release.yml) 会在 Linux 多架构 Alpine 容器中：
+仓库内的 [`release.yml`](.github/workflows/release.yml) 会构建以下平台产物：
 
-1. 从源码构建 `libqrencode` 静态库
-2. 使用 [`Makefile`](Makefile) 执行静态链接编译
-3. 上传并发布以下产物：
+### Linux
+
+- 基于 Alpine 多架构容器
+- 从源码构建静态 `libqrencode`
+- 强制检查产物不能带 ELF interpreter
 
 ```text
 qrencode-linux-amd64
@@ -122,10 +126,32 @@ qrencode-linux-s390x
 qrencode-linux-riscv64
 ```
 
+### macOS
+
+- 支持 Intel 和 Apple Silicon
+- 从源码构建静态 `libqrencode`，减少额外三方库依赖
+
+```text
+qrencode-macos-amd64
+qrencode-macos-arm64
+```
+
+### Windows
+
+- 支持 x64 与 x86
+- 使用 MSYS2 的 `MINGW64` / `MINGW32` 环境
+- 以 `MSVCRT` 路线构建，目标兼容 Windows 7 及以上版本
+
+```text
+qrencode-windows-amd64.exe
+qrencode-windows-386.exe
+```
+
 说明：
 
-- 工作流聚焦 Linux，不再包含 Go、多平台或非 C 相关流程。
-- 为减少运行时依赖，工作流优先使用静态链接。
+- 工作流只保留 C 版本相关构建流程。
+- Linux 产物必须通过静态链接校验，否则工作流直接失败。
+- Windows 构建显式使用 `-D_WIN32_WINNT=0x0601`，将最低目标版本固定为 Windows 7。
 
 ---
 
