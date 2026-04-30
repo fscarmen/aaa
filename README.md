@@ -1,84 +1,143 @@
-# cfnat C 版
+# qrencode（C 版本）
 
-这是 cfnat 的 C 语言低内存重构 MVP，优先面向 Linux 路由器、OpenWrt、ImmortalWrt 和 VPS。
+这是原 Go 版 `qrencode-go` 的 C 语言移植版。当前命令名已改为 `qrencode`，Release / CI 产物统一使用 `qrencode-linux-*` 命名。
 
-## 支持架构
+程序会在终端输出文本二维码，适合在脚本、SSH 终端或纯命令行环境中快速展示 URL / 文本内容。
 
-- linux-amd64
-- linux-arm64
-- linux-armv5
-- linux-armv6
-- linux-armv7
+## 功能特性
 
-## 功能
+- 命令行用法：`qrencode [options] <text>`
+- 支持二维码纠错等级：`L`、`M`、`Q`、`H`
+- 支持 quiet zone 边距设置
+- 支持紧凑半高字符渲染
+- 无 Go 运行时依赖
+- QR 矩阵生成使用系统 `libqrencode`，终端渲染逻辑由 C 实现
+- GitHub Actions 支持多 Linux 架构构建
 
-- Cloudflare IPv4 扫描
-- 本地缺失 IP 文件时自动下载
-- jsDelivr + GitHub raw fallback
-- locations.json 机房数据解析
-- 通过 CF-RAY 识别数据中心
-- -colo=HKG 数据中心过滤
-- 按 TCP 延迟排序
-- 自动选择可用 IP
-- 状态检查失败后自动切换 IP
-- 单端口同时支持 TLS / 非 TLS
-- TLS 流量转发到 -port=443
-- 非 TLS 流量转发到 -http-port=80
-- 精简日志
-- 可选调试日志
+## 依赖
 
-## 使用
+运行时需要安装 `libqrencode`。
+
+### Ubuntu / Debian
 
 ```bash
-chmod +x cfnat-linux-arm64
-./cfnat-linux-arm64 -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+sudo apt-get update
+sudo apt-get install -y libqrencode4
 ```
 
-## 参数
+如需从源码编译：
 
-| 参数 | 默认值 | 说明 |
-|---|---:|---|
-| -addr=0.0.0.0:40000 | 0.0.0.0:1234 | 本地监听地址 |
-| -colo=HKG | 空 | 指定 Cloudflare 数据中心 |
-| -delay=80 | 300 | TCP 连接延迟阈值，毫秒 |
-| -random=false | true | 是否从 CIDR 中随机抽取 IP |
-| -ipnum=20 | 20 | 保留候选 IP 数量 |
-| -task=100 | 100 | 扫描线程数 |
-| -num=5 | 5 | 每个客户端连接的目标连接尝试次数 |
-| -port=443 | 443 | TLS 目标端口 |
-| -http-port=80 | 80 | 非 TLS / HTTP 目标端口 |
-| -verbose=true | false | 打印详细日志 |
-| -log-conn=true | false | 打印连接日志 |
-
-## 工作原理
-
-cfnat 只监听一个本地端口。
-
-```text
-客户端 -> cfnat 本地端口 -> Cloudflare 优选 IP
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential libqrencode4
 ```
 
-连接进入后，读取首字节判断协议：
+### Fedora
 
-```text
-0x16 -> TLS 流量    -> Cloudflare IP:443
-其他 -> 非 TLS 流量 -> Cloudflare IP:80
+```bash
+sudo dnf install -y gcc make qrencode-libs
 ```
 
-程序不解密 TLS，不修改 HTTP 内容，只做 TCP 透传。
+### Arch Linux
 
-## 构建
+```bash
+sudo pacman -S --needed base-devel qrencode
+```
+
+## 编译
 
 ```bash
 make
 ```
 
-手动编译：
+生成可执行文件：
 
 ```bash
-gcc -O2 -Wall -Wextra -std=c11 -pthread -o cfnat cfnat.c
+./qrencode
 ```
 
-## 当前边界
+清理构建产物：
 
-当前 C 版本是第一阶段 MVP，优先保证低内存、Linux arm/amd 可用和核心转发逻辑。IPv6 参数保留，但第一阶段主要优化 IPv4 路径。
+```bash
+make clean
+```
+
+## 使用方法
+
+```bash
+./qrencode [options] <text>
+```
+
+### 参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `-level L/M/Q/H` | 二维码纠错等级 | `L` |
+| `-level=L/M/Q/H` | 等价写法 | `L` |
+| `-qz int` | quiet zone 边距大小 | `1` |
+| `-qz=int` | 等价写法 | `1` |
+| `-compact` | 使用半高字符紧凑输出 | `true` |
+| `-compact=true/false` | 开启或关闭紧凑输出 | `true` |
+
+## 示例
+
+```bash
+./qrencode "https://example.com"
+./qrencode -level H -qz 2 "https://example.com"
+./qrencode -compact=false "hello world"
+./qrencode -level=M -qz=1 -compact=true "hello world"
+```
+
+## GitHub Actions 多平台构建
+
+Workflow 文件：
+
+```text
+.github/workflows/build.yml
+```
+
+触发方式：
+
+- push 到 `main` / `master`
+- pull request 到 `main` / `master`
+- tag：`v*`
+- 手动 `workflow_dispatch`
+
+构建产物命名均以 `qrencode` 开头：
+
+```text
+qrencode-linux-amd64
+qrencode-linux-386
+qrencode-linux-armv5
+qrencode-linux-armv6
+qrencode-linux-armv7
+qrencode-linux-arm64
+qrencode-linux-mips
+qrencode-linux-mipsel
+qrencode-linux-mips64
+qrencode-linux-mips64el
+qrencode-linux-ppc64
+qrencode-linux-ppc64le
+qrencode-linux-riscv64
+qrencode-linux-s390x
+qrencode-linux-loongarch64
+```
+
+> 注意：当前程序通过 `dlopen` 动态加载系统 `libqrencode.so.4` 或 `libqrencode.so`，所以目标 Linux 机器仍需安装对应架构的 `libqrencode` 运行库。
+
+## 项目结构
+
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── build.yml
+├── Makefile
+├── README.md
+└── main.c
+```
+
+## 注意事项
+
+- 如果运行时报错 `libqrencode is required at runtime`，请先安装系统 `libqrencode` 运行库。
+- 本项目的二进制名称已从 `qrencode-go` 改为 `qrencode`。

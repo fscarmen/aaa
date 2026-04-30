@@ -1,13 +1,14 @@
-CC ?= gcc
-CFLAGS ?= -O2 -Wall -Wextra -std=c11
-LDFLAGS ?= -pthread
-TARGET ?= cfnat
+CC ?= cc
+CFLAGS ?= -O2 -Wall -Wextra -std=c99
+LDFLAGS ?= -ldl
+TARGET = qrencode
 
-all:
-	$(CC) $(CFLAGS) -o $(TARGET) cfnat.c $(LDFLAGS)
+.PHONY: all clean
 
-strip:
-	strip $(TARGET) || true
+all: $(TARGET)
+
+$(TARGET): main.c
+	$(CC) $(CFLAGS) -o $@ main.c $(LDFLAGS)
 
 clean:
-	rm -f cfnat cfnat-*
+	rm -f $(TARGET) qrencode-*
