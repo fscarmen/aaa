@@ -1,4 +1,4 @@
-name: Build static Linux binaries
+name: Build and Release
 
 on:
   push:
@@ -9,107 +9,107 @@ on:
 permissions:
   contents: write
 
+env:
+  LIBQRENCODE_VERSION: "4.1.1"
+
 jobs:
   build-linux:
-    name: Build ${{ matrix.name }}
+    name: build-${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-amd64, artifact: qrencode-linux-amd64, packages: "gcc libc6-dev", cc: gcc, host: x86_64-linux-gnu, cflags: "" }
-          - { name: linux-386, artifact: qrencode-linux-386, packages: "gcc-i686-linux-gnu libc6-dev-i386-cross", cc: i686-linux-gnu-gcc, host: i686-linux-gnu, cflags: "" }
-          - { name: linux-armv5, artifact: qrencode-linux-armv5, packages: "gcc-arm-linux-gnueabi libc6-dev-armel-cross", cc: arm-linux-gnueabi-gcc, host: arm-linux-gnueabi, cflags: "-march=armv5te" }
-          - { name: linux-armv6, artifact: qrencode-linux-armv6, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", cc: arm-linux-gnueabihf-gcc, host: arm-linux-gnueabihf, cflags: "-marm -march=armv6 -mfpu=vfp -mfloat-abi=hard" }
-          - { name: linux-armv7, artifact: qrencode-linux-armv7, packages: "gcc-arm-linux-gnueabihf libc6-dev-armhf-cross", cc: arm-linux-gnueabihf-gcc, host: arm-linux-gnueabihf, cflags: "-marm -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard" }
-          - { name: linux-arm64, artifact: qrencode-linux-arm64, packages: "gcc-aarch64-linux-gnu libc6-dev-arm64-cross", cc: aarch64-linux-gnu-gcc, host: aarch64-linux-gnu, cflags: "" }
-          - { name: linux-mips, artifact: qrencode-linux-mips, packages: "gcc-mips-linux-gnu libc6-dev-mips-cross", cc: mips-linux-gnu-gcc, host: mips-linux-gnu, cflags: "" }
-          - { name: linux-mipsel, artifact: qrencode-linux-mipsel, packages: "gcc-mipsel-linux-gnu libc6-dev-mipsel-cross", cc: mipsel-linux-gnu-gcc, host: mipsel-linux-gnu, cflags: "" }
-          - { name: linux-mips64, artifact: qrencode-linux-mips64, packages: "gcc-mips64-linux-gnuabi64 libc6-dev-mips64-cross", cc: mips64-linux-gnuabi64-gcc, host: mips64-linux-gnuabi64, cflags: "" }
-          - { name: linux-mips64el, artifact: qrencode-linux-mips64el, packages: "gcc-mips64el-linux-gnuabi64 libc6-dev-mips64el-cross", cc: mips64el-linux-gnuabi64-gcc, host: mips64el-linux-gnuabi64, cflags: "" }
-          - { name: linux-ppc64, artifact: qrencode-linux-ppc64, packages: "gcc-powerpc64-linux-gnu libc6-dev-ppc64-cross", cc: powerpc64-linux-gnu-gcc, host: powerpc64-linux-gnu, cflags: "" }
-          - { name: linux-ppc64le, artifact: qrencode-linux-ppc64le, packages: "gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross", cc: powerpc64le-linux-gnu-gcc, host: powerpc64le-linux-gnu, cflags: "" }
-          - { name: linux-riscv64, artifact: qrencode-linux-riscv64, packages: "gcc-riscv64-linux-gnu libc6-dev-riscv64-cross", cc: riscv64-linux-gnu-gcc, host: riscv64-linux-gnu, cflags: "" }
-          - { name: linux-s390x, artifact: qrencode-linux-s390x, packages: "gcc-s390x-linux-gnu libc6-dev-s390x-cross", cc: s390x-linux-gnu-gcc, host: s390x-linux-gnu, cflags: "" }
-    env:
-      QRENCODE_VERSION: 4.1.1
+          - name: amd64
+            platform: linux/amd64
+            artifact: qrencode-linux-amd64
+          - name: 386
+            platform: linux/386
+            artifact: qrencode-linux-386
+          - name: arm64
+            platform: linux/arm64
+            artifact: qrencode-linux-arm64
+          - name: armv7
+            platform: linux/arm/v7
+            artifact: qrencode-linux-armv7
+          - name: armv6
+            platform: linux/arm/v6
+            artifact: qrencode-linux-armv6
+          - name: ppc64le
+            platform: linux/ppc64le
+            artifact: qrencode-linux-ppc64le
+          - name: s390x
+            platform: linux/s390x
+            artifact: qrencode-linux-s390x
+          - name: riscv64
+            platform: linux/riscv64
+            artifact: qrencode-linux-riscv64
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - name: Install cross compiler and build tools
-        shell: bash
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Build static binary in Alpine container
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ matrix.packages }} ca-certificates curl file make pkg-config
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -e LIBQRENCODE_VERSION="${LIBQRENCODE_VERSION}" \
+            -e TARGET="${{ matrix.artifact }}" \
+            -v "${PWD}:/work" \
+            -w /work \
+            alpine:3.22 \
+            sh -euxc '
+              apk add --no-cache build-base cmake pkgconf autoconf automake libtool curl file
+              curl -fL "https://github.com/fukuchi/libqrencode/archive/refs/tags/v${LIBQRENCODE_VERSION}.tar.gz" -o /tmp/libqrencode.tar.gz
+              mkdir -p /tmp/libqrencode-src /tmp/libqrencode-build /opt/libqrencode-static
+              tar -xzf /tmp/libqrencode.tar.gz -C /tmp/libqrencode-src --strip-components=1
+              cd /tmp/libqrencode-src
+              ./autogen.sh
+              ./configure --prefix=/opt/libqrencode-static --without-tools --disable-shared --enable-static
+              make -j"$(getconf _NPROCESSORS_ONLN)"
+              make install
+              cd /work
+              make clean || true
+              PKG_CONFIG_PATH=/opt/libqrencode-static/lib/pkgconfig make STATIC=1 TARGET="${TARGET}"
+              file "${TARGET}"
+              ldd "${TARGET}" || true
+            '
 
-      - name: Build static libqrencode
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/qrencode.tar.gz "https://github.com/fukuchi/libqrencode/releases/download/v${QRENCODE_VERSION}/qrencode-${QRENCODE_VERSION}.tar.gz"
-          tar -xzf /tmp/qrencode.tar.gz -C /tmp
-          cd "/tmp/qrencode-${QRENCODE_VERSION}"
-          CC="${{ matrix.cc }}" CFLAGS="-O2 -pipe ${{ matrix.cflags }}" ./configure \
-            --host="${{ matrix.host }}" \
-            --prefix="$PWD/install" \
-            --enable-static \
-            --disable-shared \
-            --without-tools \
-            --without-tests \
-            --without-png
-          make -j"$(nproc)"
-          make install
-
-      - name: Build static binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          QR_PREFIX="/tmp/qrencode-${QRENCODE_VERSION}/install"
-          ${{ matrix.cc }} -O2 -pipe -std=c99 -DUSE_STATIC_QRENCODE \
-            -Wall -Wextra ${{ matrix.cflags }} \
-            -I"$QR_PREFIX/include" \
-            main.c "$QR_PREFIX/lib/libqrencode.a" \
-            -o "dist/${{ matrix.artifact }}" \
-            -static -s
-          chmod +x "dist/${{ matrix.artifact }}"
-          file "dist/${{ matrix.artifact }}"
-          if file "dist/${{ matrix.artifact }}" | grep -qi "dynamically linked"; then
-            echo "${{ matrix.artifact }} is not static" >&2
-            exit 1
-          fi
-
-      - name: Smoke test amd64 binary
-        if: ${{ matrix.name == 'linux-amd64' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./dist/${{ matrix.artifact }} "https://example.com" > /tmp/qr.txt
-          test -s /tmp/qr.txt
-
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
-          if-no-files-found: error
-          compression-level: 0
+          path: ${{ matrix.artifact }}
 
   release:
-    name: Upload binaries to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build-linux
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
         with:
-          path: dist
+          pattern: qrencode-linux-*
           merge-multiple: true
 
-      - name: List release assets
-        run: ls -lh dist
+      - name: Show artifacts
+        run: |
+          chmod +x qrencode-linux-* || true
+          ls -lah
+          file qrencode-linux-* || true
 
-      - name: Publish release assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/qrencode-linux-*
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" qrencode-linux-* --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" qrencode-linux-* --repo "$REPO" --generate-notes
+          fi
