@@ -11,4 +11,4 @@ $(TARGET): main.c
 	$(CC) $(CFLAGS) -o $@ main.c $(LDFLAGS)
 
 clean:
-	rm -f $(TARGET) qrencode-*
+	rm -f $(TARGET)
