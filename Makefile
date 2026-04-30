@@ -9,6 +9,7 @@ SRC := main.c render.c
 OBJ := $(SRC:.c=.o)
 
 ifeq ($(STATIC),1)
+LDFLAGS += -static
 PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --static --libs libqrencode)
 else
 PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --libs libqrencode)

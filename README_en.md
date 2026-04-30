@@ -35,7 +35,7 @@ Ideal for:
 - 📏 Compact half-height rendering
 - 🎨 Inverted QR body for improved visibility
 - 🔲 Configurable quiet zone
-- ⚡ Static-link-friendly build strategy to reduce runtime dependencies
+- ⚡ Targets fully static binaries to avoid runtime loader related execution failures
 - 🌍 Linux multi-architecture artifacts via GitHub Actions
 
 ---
@@ -50,6 +50,8 @@ To build from source, you need:
 - `libqrencode`
 
 For static builds, install the static `libqrencode` library and matching development files.
+
+If a downloaded binary fails with `No such file or directory`, the file may exist but its ELF interpreter or dynamic loader is missing on the target host. The workflow now explicitly fails unless it produces a binary without a dynamic interpreter.
 
 ---
 
@@ -125,7 +127,7 @@ qrencode-linux-riscv64
 Notes:
 
 - The workflow is Linux-only and C-only.
-- Static linking is preferred to reduce runtime dependency issues.
+- The workflow fails if the artifact still contains an ELF interpreter, preventing accidental dynamic release binaries.
 
 ---
 
