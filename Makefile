@@ -4,12 +4,15 @@ TARGET ?= qrencode
 CFLAGS ?= -O2 -pipe -std=c17 -Wall -Wextra -Werror
 LDFLAGS ?=
 STATIC ?= 0
+UNAME_S := $(shell uname -s 2>/dev/null || echo unknown)
 
 SRC := main.c render.c
 OBJ := $(SRC:.c=.o)
 
 ifeq ($(STATIC),1)
+ifneq ($(UNAME_S),Darwin)
 LDFLAGS += -static
+endif
 PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --static --libs libqrencode)
 else
 PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --libs libqrencode)
