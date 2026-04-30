@@ -1,4 +1,4 @@
-name: Build qrencode Linux multi-platform
+name: Build static Linux binaries
 
 on:
   push:
