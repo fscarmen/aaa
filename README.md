@@ -1,59 +1,73 @@
 # qrencode（C 版本）
 
-这是原 Go 版 `qrencode-go` 的 C 语言移植版。当前命令名已改为 `qrencode`，Release / CI 产物统一使用 `qrencode-linux-*` 命名。
+这是原 Go 版 `qrencode-go` 的 C 语言移植版。命令行参数和终端二维码渲染行为保持不变，发布产物统一命名为 `qrencode-linux-*`。
 
 程序会在终端输出文本二维码，适合在脚本、SSH 终端或纯命令行环境中快速展示 URL / 文本内容。
 
 ## 功能特性
 
-- 命令行用法：`qrencode [options] <text>`
+- 可执行文件名：`qrencode`
 - 支持二维码纠错等级：`L`、`M`、`Q`、`H`
 - 支持 quiet zone 边距设置
 - 支持紧凑半高字符渲染
-- 无 Go 运行时依赖
-- QR 矩阵生成使用系统 `libqrencode`，终端渲染逻辑由 C 实现
-- GitHub Actions 支持多 Linux 架构构建
+- Release 里的 Linux 二进制为静态链接构建，避免 `GLIBC_2.xx not found` 问题
+- Release 里的二进制静态链接 `libqrencode`，运行时不需要额外安装 `libqrencode`
 
-## 依赖
+## 直接下载 Release 二进制
 
-运行时需要安装 `libqrencode`。
+在 GitHub Release 中下载对应架构的文件，例如：
+
+```text
+qrencode-linux-amd64
+qrencode-linux-386
+qrencode-linux-armv5
+qrencode-linux-armv6
+qrencode-linux-armv7
+qrencode-linux-arm64
+qrencode-linux-mips
+qrencode-linux-mipsel
+qrencode-linux-mips64
+qrencode-linux-mips64el
+qrencode-linux-ppc64
+qrencode-linux-ppc64le
+qrencode-linux-riscv64
+qrencode-linux-s390x
+```
+
+使用示例：
+
+```bash
+chmod +x qrencode-linux-amd64
+./qrencode-linux-amd64 "https://example.com"
+```
+
+## 从源码本地编译
+
+本地默认构建会动态加载系统 `libqrencode`，适合开发调试。
 
 ### Ubuntu / Debian
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y libqrencode4
-```
-
-如需从源码编译：
-
-```bash
-sudo apt-get update
 sudo apt-get install -y build-essential libqrencode4
+make
+./qrencode "https://example.com"
 ```
 
 ### Fedora
 
 ```bash
 sudo dnf install -y gcc make qrencode-libs
+make
+./qrencode "https://example.com"
 ```
 
 ### Arch Linux
 
 ```bash
 sudo pacman -S --needed base-devel qrencode
-```
-
-## 编译
-
-```bash
 make
-```
-
-生成可执行文件：
-
-```bash
-./qrencode
+./qrencode "https://example.com"
 ```
 
 清理构建产物：
@@ -88,7 +102,13 @@ make clean
 ./qrencode -level=M -qz=1 -compact=true "hello world"
 ```
 
-## GitHub Actions 多平台构建
+IPv6 URL 示例：
+
+```bash
+./qrencode "http://[2602:294:0:dc:1234:4321:7003:1]:64221/path"
+```
+
+## GitHub Actions
 
 Workflow 文件：
 
@@ -96,34 +116,22 @@ Workflow 文件：
 .github/workflows/build.yml
 ```
 
-触发方式：
+当推送 `v*` 标签时，Actions 会：
 
-- push 到 `main` / `master`
-- pull request 到 `main` / `master`
-- tag：`v*`
-- 手动 `workflow_dispatch`
+1. 为多个 Linux 架构交叉编译静态 `libqrencode`
+2. 静态链接生成 `qrencode-linux-*` 二进制
+3. 检查产物不是 dynamically linked
+4. 将所有二进制上传为 workflow artifacts
+5. 自动把所有 `qrencode-linux-*` 附加到 GitHub Release
 
-构建产物命名均以 `qrencode` 开头：
+手动运行 `workflow_dispatch` 时只会生成 artifacts；只有 tag 构建会上传到 Release。
 
-```text
-qrencode-linux-amd64
-qrencode-linux-386
-qrencode-linux-armv5
-qrencode-linux-armv6
-qrencode-linux-armv7
-qrencode-linux-arm64
-qrencode-linux-mips
-qrencode-linux-mipsel
-qrencode-linux-mips64
-qrencode-linux-mips64el
-qrencode-linux-ppc64
-qrencode-linux-ppc64le
-qrencode-linux-riscv64
-qrencode-linux-s390x
-qrencode-linux-loongarch64
+发布新版本示例：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
 ```
-
-> 注意：当前程序通过 `dlopen` 动态加载系统 `libqrencode.so.4` 或 `libqrencode.so`，所以目标 Linux 机器仍需安装对应架构的 `libqrencode` 运行库。
 
 ## 项目结构
 
@@ -131,13 +139,8 @@ qrencode-linux-loongarch64
 .
 ├── .github/
 │   └── workflows/
-│       └── build.yml
+│       ├── build.yml
 ├── Makefile
 ├── README.md
 └── main.c
 ```
-
-## 注意事项
-
-- 如果运行时报错 `libqrencode is required at runtime`，请先安装系统 `libqrencode` 运行库。
-- 本项目的二进制名称已从 `qrencode-go` 改为 `qrencode`。
