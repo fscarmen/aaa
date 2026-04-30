@@ -1,14 +1,30 @@
 CC ?= cc
-CFLAGS ?= -O2 -Wall -Wextra -std=c99
-LDFLAGS ?= -ldl
-TARGET = qrencode
+PKG_CONFIG ?= pkg-config
+TARGET ?= qrencode
+CFLAGS ?= -O2 -pipe -std=c17 -Wall -Wextra -Werror
+LDFLAGS ?=
+STATIC ?= 0
 
-.PHONY: all clean
+SRC := main.c render.c
+OBJ := $(SRC:.c=.o)
+
+ifeq ($(STATIC),1)
+PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --static --libs libqrencode)
+else
+PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --libs libqrencode)
+endif
+
+PKG_CONFIG_CFLAGS = $(shell $(PKG_CONFIG) --cflags libqrencode)
 
 all: $(TARGET)
 
-$(TARGET): main.c
-	$(CC) $(CFLAGS) -o $@ main.c $(LDFLAGS)
+$(TARGET): $(OBJ)
+	$(CC) $(OBJ) -o $@ $(LDFLAGS) $(PKG_CONFIG_LIBS)
+
+%.o: %.c render.h
+	$(CC) $(CFLAGS) $(PKG_CONFIG_CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(OBJ) $(TARGET)
+
+.PHONY: all clean
