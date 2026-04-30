@@ -61,7 +61,7 @@ jobs:
             -w /work \
             alpine:3.22 \
             sh -euxc '
-              apk add --no-cache build-base cmake pkgconf autoconf automake libtool curl file
+              apk add --no-cache build-base cmake pkgconf autoconf automake libtool curl file binutils
               curl -fL "https://github.com/fukuchi/libqrencode/archive/refs/tags/v${LIBQRENCODE_VERSION}.tar.gz" -o /tmp/libqrencode.tar.gz
               mkdir -p /tmp/libqrencode-src /tmp/libqrencode-build /opt/libqrencode-static
               tar -xzf /tmp/libqrencode.tar.gz -C /tmp/libqrencode-src --strip-components=1
@@ -74,6 +74,11 @@ jobs:
               make clean || true
               PKG_CONFIG_PATH=/opt/libqrencode-static/lib/pkgconfig make STATIC=1 TARGET="${TARGET}"
               file "${TARGET}"
+              if readelf -l "${TARGET}" | grep -q "interpreter"; then
+                echo "ERROR: ${TARGET} is still dynamically linked"
+                readelf -l "${TARGET}"
+                exit 1
+              fi
               ldd "${TARGET}" || true
             '
 
