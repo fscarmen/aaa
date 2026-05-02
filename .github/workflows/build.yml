@@ -1,236 +1,33 @@
-name: Build and Release
+name: Build Linux ARM64
 
 on:
   push:
-    tags:
-      - "v*"
+    paths:
+      - "**/*.c"
+      - ".github/workflows/build-linux-arm64.yml"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-env:
-  LIBQRENCODE_VERSION: "4.1.1"
-
 jobs:
-  build-linux:
-    name: linux-${{ matrix.name }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: amd64
-            platform: linux/amd64
-            artifact: qrencode-linux-amd64
-          - name: 386
-            platform: linux/386
-            artifact: qrencode-linux-386
-          - name: arm64
-            platform: linux/arm64
-            artifact: qrencode-linux-arm64
-          - name: armv7
-            platform: linux/arm/v7
-            artifact: qrencode-linux-armv7
-          - name: armv6
-            platform: linux/arm/v6
-            artifact: qrencode-linux-armv6
-          - name: ppc64le
-            platform: linux/ppc64le
-            artifact: qrencode-linux-ppc64le
-          - name: s390x
-            platform: linux/s390x
-            artifact: qrencode-linux-s390x
-          - name: riscv64
-            platform: linux/riscv64
-            artifact: qrencode-linux-riscv64
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Build static binary in Alpine container
-        run: |
-          docker run --rm \
-            --platform "${{ matrix.platform }}" \
-            -e LIBQRENCODE_VERSION="${LIBQRENCODE_VERSION}" \
-            -e TARGET="${{ matrix.artifact }}" \
-            -v "${PWD}:/work" \
-            -w /work \
-            alpine:3.22 \
-            sh -euxc '
-              apk add --no-cache build-base cmake pkgconf autoconf automake libtool curl file binutils
-              curl -fL "https://github.com/fukuchi/libqrencode/archive/refs/tags/v${LIBQRENCODE_VERSION}.tar.gz" -o /tmp/libqrencode.tar.gz
-              mkdir -p /tmp/libqrencode-src /opt/libqrencode-static
-              tar -xzf /tmp/libqrencode.tar.gz -C /tmp/libqrencode-src --strip-components=1
-              cd /tmp/libqrencode-src
-              sed -i "s/return VERSION;/return \"${LIBQRENCODE_VERSION}\";/g" qrencode.c
-              ./autogen.sh
-              ./configure --prefix=/opt/libqrencode-static --without-tools --disable-shared --enable-static
-              make -j"$(getconf _NPROCESSORS_ONLN)"
-              make install
-              cd /work
-              make clean || true
-              PKG_CONFIG_PATH=/opt/libqrencode-static/lib/pkgconfig make STATIC=1 TARGET="${TARGET}"
-              file "${TARGET}"
-              if readelf -l "${TARGET}" | grep -q "interpreter"; then
-                echo "ERROR: ${TARGET} is still dynamically linked"
-                readelf -l "${TARGET}"
-                exit 1
-              fi
-              ldd "${TARGET}" || true
-            '
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-
-  build-macos:
-    name: macos-${{ matrix.name }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: amd64
-            runner: macos-15-intel
-            artifact: qrencode-macos-amd64
-            host: x86_64-apple-darwin
-          - name: arm64
-            runner: macos-14
-            artifact: qrencode-macos-arm64
-            host: aarch64-apple-darwin
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install build tools
-        run: |
-          brew update
-          brew install autoconf automake libtool pkg-config
-
-      - name: Build static libqrencode and binary
-        run: |
-          curl -fL "https://github.com/fukuchi/libqrencode/archive/refs/tags/v${LIBQRENCODE_VERSION}.tar.gz" -o /tmp/libqrencode.tar.gz
-          rm -rf /tmp/libqrencode-src /tmp/libqrencode-static
-          mkdir -p /tmp/libqrencode-src /tmp/libqrencode-static
-          tar -xzf /tmp/libqrencode.tar.gz -C /tmp/libqrencode-src --strip-components=1
-          cd /tmp/libqrencode-src
-          sed -i '' "s/return VERSION;/return \"${LIBQRENCODE_VERSION}\";/g" qrencode.c
-          ./autogen.sh
-          ./configure --prefix=/tmp/libqrencode-static --without-tools --disable-shared --enable-static --host="${{ matrix.host }}"
-          make -j"$(sysctl -n hw.logicalcpu)"
-          make install
-          cd "${GITHUB_WORKSPACE}"
-          make clean || true
-          PKG_CONFIG_PATH=/tmp/libqrencode-static/lib/pkgconfig make STATIC=1 TARGET="${{ matrix.artifact }}"
-          file "${{ matrix.artifact }}"
-          otool -L "${{ matrix.artifact }}"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-
-  build-windows:
-    name: windows-${{ matrix.name }}
-    runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: amd64
-            msystem: MINGW64
-            mingw_prefix: /mingw64
-            pkg_prefix: mingw-w64-x86_64
-            artifact: qrencode-windows-amd64.exe
-          - name: 386
-            msystem: MINGW32
-            mingw_prefix: /mingw32
-            pkg_prefix: mingw-w64-i686
-            artifact: qrencode-windows-386.exe
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: ${{ matrix.msystem }}
-          update: true
-          install: >-
-            base-devel
-            git
-            curl
-            autoconf
-            automake
-            libtool
-            pkgconf
-            make
-            tar
-            ${{ matrix.pkg_prefix }}-gcc
-            ${{ matrix.pkg_prefix }}-binutils
-
-      - name: Build static libqrencode and binary
-        shell: msys2 {0}
-        run: |
-          set -euxo pipefail
-          curl -fL "https://github.com/fukuchi/libqrencode/archive/refs/tags/v${LIBQRENCODE_VERSION}.tar.gz" -o /tmp/libqrencode.tar.gz
-          rm -rf /tmp/libqrencode-src /tmp/libqrencode-static
-          mkdir -p /tmp/libqrencode-src /tmp/libqrencode-static
-          tar -xzf /tmp/libqrencode.tar.gz -C /tmp/libqrencode-src --strip-components=1
-          cd /tmp/libqrencode-src
-          export CFLAGS="-O2 -D_WIN32_WINNT=0x0601 -DWINVER=0x0601"
-          sed -i "s/return VERSION;/return \"${LIBQRENCODE_VERSION}\";/g" qrencode.c
-          ./autogen.sh
-          ./configure --prefix=/tmp/libqrencode-static --without-tools --disable-shared --enable-static
-          make -j"$(nproc)"
-          make install
-          cd "${GITHUB_WORKSPACE}"
-          make clean || true
-          PKG_CONFIG_PATH=/tmp/libqrencode-static/lib/pkgconfig make STATIC=1 TARGET="${{ matrix.artifact }}" CFLAGS="-O2 -pipe -std=c17 -Wall -Wextra -Werror -D_WIN32_WINNT=0x0601 -DWINVER=0x0601" LDFLAGS="-static -static-libgcc"
-          file "${{ matrix.artifact }}"
-          objdump -p "${{ matrix.artifact }}" | grep 'DLL Name' || true
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - build-linux
-      - build-macos
-      - build-windows
+  build-linux-arm64:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v8
+      - name: Install ARM64 compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: |
+          aarch64-linux-gnu-gcc -pthread -O2 -Wall -Wextra \
+            cfnat_linux_ipmode.c \
+            -o cfnat_linux_arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          pattern: qrencode-*
-          merge-multiple: true
-
-      - name: Show artifacts
-        run: |
-          chmod +x qrencode-* || true
-          ls -lah
-          file qrencode-* || true
-
-      - name: Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${GITHUB_REF_NAME}"
-          REPO="${GITHUB_REPOSITORY}"
-
-          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" qrencode-* --repo "$REPO" --clobber
-          else
-            gh release create "$TAG" qrencode-* --repo "$REPO" --generate-notes
-          fi
+          name: cfnat_linux_arm64
+          path: cfnat_linux_arm64
