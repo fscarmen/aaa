@@ -161,7 +161,7 @@ static void usage(const char *p)  {
     printf("  -port=value        TLS 转发目标端口 (default 443)\n");
     printf("  -http-port=value   非TLS/HTTP 转发目标端口 (default 80)\n");
     printf("  -random=value      是否随机生成IP (default true)\n");
-    printf("  -ip-mode=value     IP选择策略 best/first/rotate/random (default best)\n");
+    printf("  -mode=value        IP选择策略 best/first/rotate/random (default best)\n");
     printf("  -task=value        扫描线程数 (default 100)\n");
     printf("  -verbose=value     详细日志 (default false)\n");
     printf("  -log-conn=value    连接日志 (default false)\n");
@@ -247,7 +247,7 @@ static void parse_args(Config *c, int argc, char **argv)  {
         else if (!strcmp(key,"port")&&val) c->port=atoi(val);
         else if (!strcmp(key,"http-port")&&val) c->http_port=atoi(val);
         else if (!strcmp(key,"random")) c->random_mode=parse_bool(val);
-        else if (!strcmp(key,"ip-mode")&&val) c->ip_mode=parse_ip_mode(val);
+        else if (!strcmp(key,"mode")&&val) c->ip_mode=parse_ip_mode(val);
         else if (!strcmp(key,"task")&&val) c->task=atoi(val);
         else if (!strcmp(key,"health-log")&&val) c->health_log=atoi(val);
         else if (!strcmp(key,"verbose")) c->verbose=parse_bool(val);
@@ -666,7 +666,10 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     pthread_mutex_init(&rl.mu,NULL);
     int threads=cfg->task;
     if ((size_t)threads>ips->len)threads=(int)ips->len;
-    if (threads<=0)return rl;
+    if (threads<=0) {
+        pthread_mutex_destroy(&rl.mu);
+        return rl;
+    }
     pthread_t*tids=calloc((size_t)threads,sizeof(pthread_t));
     ScanCtx ctx= {
         .ips=ips->items,.total=ips->len,.results=&rl,.cfg=cfg
@@ -682,6 +685,7 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     free(tids);
     qsort(rl.items,rl.len,sizeof(Result),cmp_result);
     if (rl.len>(size_t)cfg->ipnum)rl.len=(size_t)cfg->ipnum;
+    pthread_mutex_destroy(&rl.mu);
     return rl;
 }
 
@@ -1019,6 +1023,10 @@ int main(int argc,char**argv) {
     StringList ips=load_ip_list(ipfile,g_cfg.random_mode);
     if (ips.len==0) {
         log_msg("没有可扫描的 IP");
+        free(g_locations);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
     long start=0;
@@ -1045,19 +1053,23 @@ int main(int argc,char**argv) {
     i<results.len;
     i++)printf("%s | %s | %s | %s | %d ms\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms);
     printf("成功提取 %zu 个有效IP，耗时 %ld秒\n",results.len,(now_ms()-start)/1000);
+    strlist_free(&ips);
     g_candidates=results.items;
     g_candidate_count=results.len;
     if (!select_valid_ip()) {
         log_msg("没有有效的 IP 可用");
-        strlist_free(&ips);
         free(results.items);
+        free(g_locations);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
     int lfd=listen_tcp(g_cfg.addr);
     if (lfd<0) {
         log_msg("无法监听 %s: %s",g_cfg.addr,strerror(errno));
-        strlist_free(&ips);
         free(results.items);
+        free(g_locations);
         return 1;
     }
     g_listen_fd=lfd;
@@ -1100,7 +1112,6 @@ int main(int argc,char**argv) {
     if (lfd>=0)close(lfd);
     g_listen_fd=-1;
     pthread_join(ht,NULL);
-    strlist_free(&ips);
     free(results.items);
     free(g_locations);
     return 0;
