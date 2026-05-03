@@ -49,10 +49,19 @@ typedef enum  {
     MODE_STABILITY
 }
 ScanMode;
+typedef enum  {
+    LOG_SILENT=0,
+    LOG_ERROR,
+    LOG_WARN,
+    LOG_INFO,
+    LOG_DEBUG
+}
+LogLevel;
 typedef struct  {
-    char addr[64], colo[128], domain[256], mode_name[32];
-    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log, verbose, log_conn, ai_recommend, ai_explain, mode_explicit;
+    char addr[64], colo[128], domain[256], mode_name[32], log_name[16];
+    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log, ai_recommend, ai_explain, mode_explicit;
     ScanMode mode;
+    LogLevel log_level;
 }
 Config;
 typedef struct  {
@@ -114,41 +123,103 @@ static long now_ms(void)  {
 }
 
 
-static void vlog_line(const char *fmt, va_list ap)  {
+static const char* log_level_name(LogLevel level) {
+    switch (level) {
+        case LOG_SILENT:return "silent";
+        case LOG_ERROR:return "error";
+        case LOG_WARN:return "warn";
+        case LOG_INFO:return "info";
+        case LOG_DEBUG:
+        default:return "debug";
+    }
+}
+
+
+static int parse_log_level(const char *v, LogLevel *out) {
+    if (!v||!*v)return -1;
+    if (!strcasecmp(v,"silent")||!strcasecmp(v,"off")) {
+        *out=LOG_SILENT;
+        return 0;
+    }
+    if (!strcasecmp(v,"error")) {
+        *out=LOG_ERROR;
+        return 0;
+    }
+    if (!strcasecmp(v,"warn")||!strcasecmp(v,"warning")) {
+        *out=LOG_WARN;
+        return 0;
+    }
+    if (!strcasecmp(v,"info")) {
+        *out=LOG_INFO;
+        return 0;
+    }
+    if (!strcasecmp(v,"debug")) {
+        *out=LOG_DEBUG;
+        return 0;
+    }
+    return -1;
+}
+
+
+static void vlog_line(const char *tag,const char *fmt, va_list ap)  {
     time_t t=time(NULL);
     struct tm tmv;
     localtime_r(&t,&tmv);
     char ts[32];
     strftime(ts,sizeof(ts),"%Y/%m/%d %H:%M:%S",&tmv);
-    fprintf(stderr,"%s ",ts);
+    fprintf(stderr,"%s [%s] ",ts,tag);
     vfprintf(stderr,fmt,ap);
     fputc('\n',stderr);
 }
 
 
 static void log_msg(const char *fmt, ...)  {
+    if (g_cfg.log_level<LOG_INFO) return;
     va_list ap;
     va_start(ap,fmt);
-    vlog_line(fmt,ap);
+    vlog_line("INFO",fmt,ap);
+    va_end(ap);
+}
+
+
+static void warn_msg(const char *fmt, ...)  {
+    if (g_cfg.log_level<LOG_WARN) return;
+    va_list ap;
+    va_start(ap,fmt);
+    vlog_line("WARN",fmt,ap);
     va_end(ap);
 }
 
 
 static void debug_msg(const char *fmt, ...)  {
-    if (!g_cfg.verbose) return;
+    if (g_cfg.log_level<LOG_DEBUG) return;
     va_list ap;
     va_start(ap,fmt);
-    vlog_line(fmt,ap);
+    vlog_line("DEBUG",fmt,ap);
     va_end(ap);
 }
 
 
 static void conn_msg(const char *fmt, ...)  {
-    if (!g_cfg.verbose && !g_cfg.log_conn) return;
+    if (g_cfg.log_level<LOG_INFO) return;
     va_list ap;
     va_start(ap,fmt);
-    vlog_line(fmt,ap);
+    vlog_line("CONN",fmt,ap);
     va_end(ap);
+}
+
+
+static int sleep_interruptible_ms(int ms) {
+    int left=ms;
+    while (left>0&&atomic_load(&g_running)) {
+        int chunk=left>200?200:left;
+        struct timespec ts;
+        ts.tv_sec=chunk/1000;
+        ts.tv_nsec=(long)(chunk%1000)*1000000L;
+        nanosleep(&ts,NULL);
+        left-=chunk;
+    }
+    return atomic_load(&g_running)?0:-1;
 }
 
 
@@ -188,15 +259,12 @@ static void usage(const char *p)  {
     printf("  -ipnum=value       提取的有效IP数量 (default 20)\n");
     printf("  -ips=value         指定IPv4还是IPv6 (4或6, C版优先IPv4)\n");
     printf("  -mode=value        recommended=推荐模式, speed=最快模式, stability=最稳模式\n");
-    printf("  -ai-recommend      启用本地智能推荐模式 (default false)\n");
-    printf("  -ai-explain        输出推荐理由和结果解释 (default false)\n");
+    printf("  -log=value         日志级别: silent,error,warn,info,debug (default info)\n");
     printf("  -num=value         每个连接的目标连接尝试次数 (default 5)\n");
     printf("  -port=value        TLS 转发目标端口 (default 443)\n");
     printf("  -http-port=value   非TLS/HTTP 转发目标端口 (default 80)\n");
     printf("  -random=value      是否随机生成IP (default true)\n");
     printf("  -task=value        扫描线程数 (default 100)\n");
-    printf("  -verbose=value     详细日志 (default false)\n");
-    printf("  -log-conn=value    连接日志 (default false)\n");
 }
 
 
@@ -210,6 +278,7 @@ static void cfg_defaults(Config *c)  {
     strcpy(c->addr,"0.0.0.0:1234");
     strcpy(c->domain,"cloudflaremirrors.com/debian");
     strcpy(c->mode_name,"recommended");
+    strcpy(c->log_name,"info");
     c->code=200;
     c->delay_ms=300;
     c->ipnum=20;
@@ -221,6 +290,7 @@ static void cfg_defaults(Config *c)  {
     c->task=100;
     c->health_log=60;
     c->mode=MODE_RECOMMENDED;
+    c->log_level=LOG_INFO;
 }
 
 
@@ -259,16 +329,19 @@ static void parse_args(Config *c, int argc, char **argv)  {
             snprintf(c->mode_name,sizeof(c->mode_name),"%s",mode_name(c->mode));
             c->mode_explicit=1;
         }
-        else if (!strcmp(key,"ai-recommend")) c->ai_recommend=parse_bool(val);
-        else if (!strcmp(key,"ai-explain")) c->ai_explain=parse_bool(val);
+        else if (!strcmp(key,"log")&&val) {
+            if (parse_log_level(val,&c->log_level)!=0) {
+                fprintf(stderr,"非法 -log=%s，可选值: silent, error, warn, info, debug\n",val);
+                exit(1);
+            }
+            snprintf(c->log_name,sizeof(c->log_name),"%s",log_level_name(c->log_level));
+        }
         else if (!strcmp(key,"num")&&val) c->num=atoi(val);
         else if (!strcmp(key,"port")&&val) c->port=atoi(val);
         else if (!strcmp(key,"http-port")&&val) c->http_port=atoi(val);
         else if (!strcmp(key,"random")) c->random_mode=parse_bool(val);
         else if (!strcmp(key,"task")&&val) c->task=atoi(val);
         else if (!strcmp(key,"health-log")&&val) c->health_log=atoi(val);
-        else if (!strcmp(key,"verbose")) c->verbose=parse_bool(val);
-        else if (!strcmp(key,"log-conn")) c->log_conn=parse_bool(val);
     }
     if (c->delay_ms<=0)c->delay_ms=300;
     if (c->ipnum<=0)c->ipnum=20;
@@ -751,12 +824,13 @@ static const char* mode_summary(ScanMode mode) {
 
 static void explain_selected_result(const Result*best,const char*ai_reason) {
     if (!best)return;
+    if (g_cfg.log_level<LOG_INFO) return;
     printf("模式说明: %s\n",mode_summary(g_cfg.mode));
-    if (g_cfg.ai_recommend) {
-        printf("AI 推荐: %s\n",ai_reason&&*ai_reason?ai_reason:"根据候选池统计自动选择模式");
+    if (g_cfg.log_level>=LOG_INFO) {
+        printf("模式理由: %s\n",ai_reason&&*ai_reason?ai_reason:"根据候选池统计自动选择模式");
     }
-    if (g_cfg.ai_explain) {
-        printf("AI 解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，探测成功 %d/%d。\n",best->ip,best->latency_ms,best->loss_rate,best->success_count,best->probe_count);
+    if (g_cfg.log_level>=LOG_DEBUG) {
+        printf("结果解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，探测成功 %d/%d。\n",best->ip,best->latency_ms,best->loss_rate,best->success_count,best->probe_count);
     }
 }
 
@@ -857,15 +931,18 @@ static int rescan_and_select_ip(void) {
         if (!atomic_load(&g_running))return 0;
         StringList ips=load_ip_list(ipfile,g_cfg.random_mode);
         if (ips.len==0) {
-            log_msg("没有可扫描的 IP，3 秒后重试");
-            sleep(3);
+            warn_msg("没有可扫描的 IP，3 秒后重试");
+            if (sleep_interruptible_ms(3000)!=0) return 0;
             continue;
         }
         ResultList results=scan_ips(&ips,&g_cfg);
         strlist_free(&ips);
         if (results.len==0) {
-            log_msg("重新扫描后仍未发现有效IP，3 秒后重试");
-            sleep(3);
+            warn_msg("重新扫描后仍未发现有效IP，3 秒后重试");
+            if (sleep_interruptible_ms(3000)!=0) {
+                strlist_free(&ips);
+                return 0;
+            }
             continue;
         }
         g_candidates=results.items;
@@ -875,8 +952,8 @@ static int rescan_and_select_ip(void) {
         free(results.items);
         g_candidates=NULL;
         g_candidate_count=0;
-        log_msg("重新扫描得到的候选 IP 健康检查均失败，3 秒后重试");
-        sleep(3);
+        warn_msg("重新扫描得到的候选 IP 健康检查均失败，3 秒后重试");
+        if (sleep_interruptible_ms(3000)!=0) return 0;
     }
 }
 
@@ -893,7 +970,7 @@ static void* health_thread(void*arg) {
     int fail=0;
     long last=0;
     while (atomic_load(&g_running)) {
-        sleep(10);
+        if (sleep_interruptible_ms(10000)!=0) break;
         char ip[MAX_IP_LEN];
         get_current_ip(ip,sizeof(ip));
         if (!ip[0]||!health_check_ip(ip)) {
@@ -1110,15 +1187,19 @@ int main(int argc,char**argv) {
         start=now_ms();
         results=scan_ips(&ips,&g_cfg);
         if (results.len>0)break;
-        log_msg("未发现有效IP，可尝试放宽 -delay 或开启 -verbose=true 查看细节，3 秒后重试");
+        warn_msg("未发现有效IP，可尝试放宽 -delay 或提高 -log=debug 查看细节，3 秒后重试");
         if (!atomic_load(&g_running)) {
             strlist_free(&ips);
             free(g_locations);
             return 0;
         }
-        sleep(3);
+        if (sleep_interruptible_ms(3000)!=0) {
+            strlist_free(&ips);
+            free(g_locations);
+            return 0;
+        }
     }
-    if (g_cfg.ai_recommend&&!g_cfg.mode_explicit) {
+    if (!g_cfg.mode_explicit) {
         g_cfg.mode=recommend_mode_from_results(&results,ai_reason,sizeof(ai_reason),&ai_confidence);
         snprintf(g_cfg.mode_name,sizeof(g_cfg.mode_name),"%s",mode_name(g_cfg.mode));
         g_sort_mode=g_cfg.mode;
@@ -1126,12 +1207,11 @@ int main(int argc,char**argv) {
     }
     printf("候选池统计\n");
     printf("当前模式: %s\n",g_cfg.mode_name);
-    printf("模式说明: %s\n",mode_summary(g_cfg.mode));
     printf("候选总数: %zu\n",results.len);
-    if (g_cfg.ai_recommend) {
-        printf("AI 推荐模式: %s\n",g_cfg.mode_name);
-        printf("AI 推荐置信度: %d%%\n",ai_confidence);
-        printf("AI 推荐理由: %s\n",ai_reason[0]?ai_reason:"根据候选池统计自动推荐");
+    if (g_cfg.log_level>=LOG_INFO) {
+        printf("模式说明: %s\n",mode_summary(g_cfg.mode));
+        printf("模式置信度: %d%%\n",ai_confidence);
+        printf("模式理由: %s\n",ai_reason[0]?ai_reason:"根据候选池统计自动推荐");
     }
     printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
     for (size_t i=0;
@@ -1160,7 +1240,7 @@ int main(int argc,char**argv) {
         return 1;
     }
     g_listen_fd=lfd;
-    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，模式：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.mode_name);
+    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，模式：%s，日志：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.mode_name,g_cfg.log_name);
     pthread_t ht;
     create_small_thread(&ht,health_thread,NULL);
     while (atomic_load(&g_running)) {
@@ -1170,7 +1250,7 @@ int main(int argc,char**argv) {
         if (cfd<0) {
             if (!atomic_load(&g_running))break;
             if (errno==EINTR||errno==EBADF)break;
-            sleep(1);
+            if (sleep_interruptible_ms(1000)!=0) break;
             continue;
         }
         char ip[MAX_IP_LEN];
