@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install ARM64 compiler
         run: |
@@ -31,7 +31,7 @@ jobs:
           ls -lh cfnat_linux_arm64
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
-          name: cfnat_linux_arm64
-          path: cfnat_linux_arm64
+          name: cfnat-linux-arm64
+          path: cfnat-linux-arm64
