@@ -22,13 +22,13 @@ jobs:
       - name: Build static ARM64
         run: |
           aarch64-linux-gnu-gcc -static -pthread -O2 -Wall -Wextra \
-            cfnat_linux_ipmode.c \
-            -o cfnat_linux_arm64
+            cfnat_linux.c \
+            -o cfnat-linux-arm64
 
       - name: Check binary
         run: |
-          file cfnat_linux_arm64
-          ls -lh cfnat_linux_arm64
+          file cfnat-linux-arm64
+          ls -lh cfnat-linux-arm64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
