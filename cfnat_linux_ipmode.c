@@ -25,10 +25,6 @@
 #define MAX_CITY_LEN 64
 #define MAX_LINE 512
 #define COPY_BUF_SIZE 16384
-#define IP_MODE_BEST 0
-#define IP_MODE_FIRST 1
-#define IP_MODE_ROTATE 2
-#define IP_MODE_RANDOM 3
 static const char *IPS_V4_URLS[] =  {
     "https://cdn.jsdelivr.net/gh/fscarmen/cfnat@main/ips-v4",
     "https://raw.githubusercontent.com/fscarmen/cfnat/main/ips-v4",
@@ -47,9 +43,16 @@ static const char *LOC_URLS[] =  {
     NULL
 }
 ;
+typedef enum  {
+    MODE_RECOMMENDED=0,
+    MODE_SPEED,
+    MODE_STABILITY
+}
+ScanMode;
 typedef struct  {
-    char addr[64], colo[128], domain[256];
-    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, ip_mode, task, health_log, verbose, log_conn;
+    char addr[64], colo[128], domain[256], mode_name[32];
+    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log, verbose, log_conn, ai_recommend, ai_explain, mode_explicit;
+    ScanMode mode;
 }
 Config;
 typedef struct  {
@@ -58,7 +61,7 @@ typedef struct  {
 Location;
 typedef struct  {
     char ip[MAX_IP_LEN], data_center[MAX_COLO_LEN], region[MAX_REGION_LEN], city[MAX_CITY_LEN];
-    int latency_ms;
+    int latency_ms, loss_rate, probe_count, success_count;
 }
 Result;
 typedef struct  {
@@ -101,7 +104,6 @@ static char g_current_ip[MAX_IP_LEN] =  {
 static pthread_mutex_t g_ip_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int g_running = 1;
 static atomic_int g_active_connections = 0;
-static atomic_size_t g_ip_mode_index = 0;
 static int g_listen_fd = -1;
 
 
@@ -150,6 +152,34 @@ static void conn_msg(const char *fmt, ...)  {
 }
 
 
+static const char* mode_name(ScanMode mode) {
+    switch (mode) {
+        case MODE_SPEED:return "speed";
+        case MODE_STABILITY:return "stability";
+        case MODE_RECOMMENDED:
+        default:return "recommended";
+    }
+}
+
+
+static int parse_mode_value(const char *v, ScanMode *out) {
+    if (!v||!*v)return -1;
+    if (!strcasecmp(v,"recommended")) {
+        *out=MODE_RECOMMENDED;
+        return 0;
+    }
+    if (!strcasecmp(v,"speed")) {
+        *out=MODE_SPEED;
+        return 0;
+    }
+    if (!strcasecmp(v,"stability")) {
+        *out=MODE_STABILITY;
+        return 0;
+    }
+    return -1;
+}
+
+
 static void usage(const char *p)  {
     printf("Usage of %s:\n", p);
     printf("  -addr=value        本地监听的 IP 和端口 (default 0.0.0.0:1234)\n");
@@ -157,11 +187,13 @@ static void usage(const char *p)  {
     printf("  -delay=value       有效延迟毫秒 (default 300)\n");
     printf("  -ipnum=value       提取的有效IP数量 (default 20)\n");
     printf("  -ips=value         指定IPv4还是IPv6 (4或6, C版优先IPv4)\n");
+    printf("  -mode=value        recommended=推荐模式, speed=最快模式, stability=最稳模式\n");
+    printf("  -ai-recommend      启用本地智能推荐模式 (default false)\n");
+    printf("  -ai-explain        输出推荐理由和结果解释 (default false)\n");
     printf("  -num=value         每个连接的目标连接尝试次数 (default 5)\n");
     printf("  -port=value        TLS 转发目标端口 (default 443)\n");
     printf("  -http-port=value   非TLS/HTTP 转发目标端口 (default 80)\n");
     printf("  -random=value      是否随机生成IP (default true)\n");
-    printf("  -mode=value        IP选择策略 best/first/rotate/random (default best)\n");
     printf("  -task=value        扫描线程数 (default 100)\n");
     printf("  -verbose=value     详细日志 (default false)\n");
     printf("  -log-conn=value    连接日志 (default false)\n");
@@ -173,35 +205,11 @@ static int parse_bool(const char *v)  {
 }
 
 
-static const char *ip_mode_name(int mode)  {
-    switch (mode) {
-    case IP_MODE_FIRST:
-        return "first";
-    case IP_MODE_ROTATE:
-        return "rotate";
-    case IP_MODE_RANDOM:
-        return "random";
-    case IP_MODE_BEST:
-    default:
-        return "best";
-    }
-}
-
-
-static int parse_ip_mode(const char *v)  {
-    if (!v || !strcmp(v,"best")) return IP_MODE_BEST;
-    if (!strcmp(v,"first")) return IP_MODE_FIRST;
-    if (!strcmp(v,"rotate")) return IP_MODE_ROTATE;
-    if (!strcmp(v,"random")) return IP_MODE_RANDOM;
-    fprintf(stderr,"无效 IP 选择策略: %s，可选值: best, first, rotate, random\n",v);
-    exit(1);
-}
-
-
 static void cfg_defaults(Config *c)  {
     memset(c,0,sizeof(*c));
     strcpy(c->addr,"0.0.0.0:1234");
     strcpy(c->domain,"cloudflaremirrors.com/debian");
+    strcpy(c->mode_name,"recommended");
     c->code=200;
     c->delay_ms=300;
     c->ipnum=20;
@@ -210,9 +218,9 @@ static void cfg_defaults(Config *c)  {
     c->port=443;
     c->http_port=80;
     c->random_mode=1;
-    c->ip_mode=IP_MODE_BEST;
     c->task=100;
     c->health_log=60;
+    c->mode=MODE_RECOMMENDED;
 }
 
 
@@ -243,11 +251,20 @@ static void parse_args(Config *c, int argc, char **argv)  {
         else if (!strcmp(key,"domain")&&val) snprintf(c->domain,sizeof(c->domain),"%s",val);
         else if (!strcmp(key,"ipnum")&&val) c->ipnum=atoi(val);
         else if (!strcmp(key,"ips")&&val) c->ips_type=atoi(val);
+        else if (!strcmp(key,"mode")&&val) {
+            if (parse_mode_value(val,&c->mode)!=0) {
+                fprintf(stderr,"非法 -mode=%s，可选值: recommended, speed, stability\n",val);
+                exit(1);
+            }
+            snprintf(c->mode_name,sizeof(c->mode_name),"%s",mode_name(c->mode));
+            c->mode_explicit=1;
+        }
+        else if (!strcmp(key,"ai-recommend")) c->ai_recommend=parse_bool(val);
+        else if (!strcmp(key,"ai-explain")) c->ai_explain=parse_bool(val);
         else if (!strcmp(key,"num")&&val) c->num=atoi(val);
         else if (!strcmp(key,"port")&&val) c->port=atoi(val);
         else if (!strcmp(key,"http-port")&&val) c->http_port=atoi(val);
         else if (!strcmp(key,"random")) c->random_mode=parse_bool(val);
-        else if (!strcmp(key,"mode")&&val) c->ip_mode=parse_ip_mode(val);
         else if (!strcmp(key,"task")&&val) c->task=atoi(val);
         else if (!strcmp(key,"health-log")&&val) c->health_log=atoi(val);
         else if (!strcmp(key,"verbose")) c->verbose=parse_bool(val);
@@ -615,46 +632,132 @@ static void resultlist_add(ResultList*rl,const Result*r) {
 
 static void* scan_worker(void*arg) {
     ScanCtx*ctx=(ScanCtx*)arg;
+    const char*req="GET / HTTP/1.1\r\nHost: cloudflaremirrors.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
     while (1) {
         size_t idx=atomic_fetch_add(&ctx->index,1);
         if (idx>=ctx->total)break;
         const char*ip=ctx->ips[idx];
-        int latency=0;
-        int fd=tcp_connect(ip,80,ctx->cfg->delay_ms,&latency);
-        if (fd<0)continue;
-        const char*req="GET / HTTP/1.1\r\nHost: cloudflaremirrors.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
-        send(fd,req,strlen(req),0);
-        char hdr[4096];
-        int n=recv_headers(fd,hdr,sizeof(hdr),2000);
-        close(fd);
-        if (n<=0)continue;
-        char colo[MAX_COLO_LEN]= {
-            0
+        int probes=ctx->cfg->num>0?ctx->cfg->num:1;
+        int success_count=0;
+        int best_latency=0;
+        char best_colo[MAX_COLO_LEN]= {0};
+        for (int attempt=0; attempt<probes; attempt++) {
+            int latency=0;
+            int fd=tcp_connect(ip,80,ctx->cfg->delay_ms,&latency);
+            if (fd<0)continue;
+            send(fd,req,strlen(req),0);
+            char hdr[4096];
+            int n=recv_headers(fd,hdr,sizeof(hdr),2000);
+            close(fd);
+            if (n<=0)continue;
+            char colo[MAX_COLO_LEN]= {0};
+            if (extract_cfray(hdr,colo,sizeof(colo))!=0)continue;
+            if (!colo_allowed(colo))continue;
+            success_count++;
+            if (best_latency==0||latency<best_latency) {
+                best_latency=latency;
+                snprintf(best_colo,sizeof(best_colo),"%s",colo);
+            }
         }
-        ;
-        if (extract_cfray(hdr,colo,sizeof(colo))!=0)continue;
-        if (!colo_allowed(colo))continue;
+        if (success_count<=0||!best_colo[0]||best_latency<=0)continue;
         Result r;
         memset(&r,0,sizeof(r));
         snprintf(r.ip,sizeof(r.ip),"%s",ip);
-        snprintf(r.data_center,sizeof(r.data_center),"%s",colo);
-        r.latency_ms=latency;
-        Location*loc=find_location(colo);
+        snprintf(r.data_center,sizeof(r.data_center),"%s",best_colo);
+        r.latency_ms=best_latency;
+        r.probe_count=probes;
+        r.success_count=success_count;
+        r.loss_rate=(probes-success_count)*100/probes;
+        Location*loc=find_location(best_colo);
         if (loc) {
             snprintf(r.region,sizeof(r.region),"%s",loc->region);
             snprintf(r.city,sizeof(r.city),"%s",loc->city);
         }
-        debug_msg("发现有效IP %s 位置信息 %s 延迟 %d 毫秒",r.ip,r.city[0]?r.city:"未知",latency);
+        debug_msg("发现有效IP %s 位置信息 %s 延迟 %d 毫秒 丢包 %d%% (%d/%d)",r.ip,r.city[0]?r.city:"未知",r.latency_ms,r.loss_rate,r.success_count,r.probe_count);
         resultlist_add(ctx->results,&r);
     }
     return NULL;
 }
 
 
+static ScanMode g_sort_mode=MODE_RECOMMENDED;
+
+
 static int cmp_result(const void*a,const void*b) {
     const Result*ra=(const Result*)a;
     const Result*rb=(const Result*)b;
-    return ra->latency_ms-rb->latency_ms;
+    if (g_sort_mode==MODE_SPEED) {
+        if (ra->latency_ms!=rb->latency_ms)return ra->latency_ms-rb->latency_ms;
+        return ra->loss_rate-rb->loss_rate;
+    }
+    if (g_sort_mode==MODE_STABILITY) {
+        if (ra->loss_rate!=rb->loss_rate)return ra->loss_rate-rb->loss_rate;
+        return ra->latency_ms-rb->latency_ms;
+    }
+    int delta=ra->latency_ms-rb->latency_ms;
+    if (delta<0)delta=-delta;
+    if (delta<=10&&ra->loss_rate!=rb->loss_rate)return ra->loss_rate-rb->loss_rate;
+    if (ra->latency_ms!=rb->latency_ms)return ra->latency_ms-rb->latency_ms;
+    return ra->loss_rate-rb->loss_rate;
+}
+
+
+static ScanMode recommend_mode_from_results(const ResultList*rl,char*reason,size_t reason_sz,int*confidence) {
+    if (!rl||rl->len==0) {
+        if (reason&&reason_sz) snprintf(reason,reason_sz,"候选池为空，回退到 recommended");
+        if (confidence) *confidence=10;
+        return MODE_RECOMMENDED;
+    }
+    int min_latency=rl->items[0].latency_ms;
+    int min_loss=rl->items[0].loss_rate;
+    long total_latency=0;
+    long total_loss=0;
+    int unstable_count=0;
+    for (size_t i=0; i<rl->len; i++) {
+        const Result*r=&rl->items[i];
+        if (r->latency_ms<min_latency) min_latency=r->latency_ms;
+        if (r->loss_rate<min_loss) min_loss=r->loss_rate;
+        total_latency+=r->latency_ms;
+        total_loss+=r->loss_rate;
+        if (r->loss_rate>10) unstable_count++;
+    }
+    int avg_latency=(int)(total_latency/(long)rl->len);
+    int avg_loss=(int)(total_loss/(long)rl->len);
+    if (unstable_count>(int)(rl->len/3)||avg_loss>=8) {
+        if (reason&&reason_sz) snprintf(reason,reason_sz,"检测到候选池平均丢包偏高(%d%%)，优先稳定性",avg_loss);
+        if (confidence) *confidence=86;
+        return MODE_STABILITY;
+    }
+    if (min_latency<=avg_latency-20&&min_loss<=5) {
+        if (reason&&reason_sz) snprintf(reason,reason_sz,"检测到低延迟优势明显(最低 %d ms，平均 %d ms)",min_latency,avg_latency);
+        if (confidence) *confidence=78;
+        return MODE_SPEED;
+    }
+    if (reason&&reason_sz) snprintf(reason,reason_sz,"速度与稳定性差异都不极端，使用 recommended 平衡模式");
+    if (confidence) *confidence=72;
+    return MODE_RECOMMENDED;
+}
+
+
+static const char* mode_summary(ScanMode mode) {
+    switch (mode) {
+        case MODE_SPEED:return "speed=最快模式，优先最低延迟";
+        case MODE_STABILITY:return "stability=最稳模式，优先最低丢包";
+        case MODE_RECOMMENDED:
+        default:return "recommended=推荐模式，优先综合速度与稳定性";
+    }
+}
+
+
+static void explain_selected_result(const Result*best,const char*ai_reason) {
+    if (!best)return;
+    printf("模式说明: %s\n",mode_summary(g_cfg.mode));
+    if (g_cfg.ai_recommend) {
+        printf("AI 推荐: %s\n",ai_reason&&*ai_reason?ai_reason:"根据候选池统计自动选择模式");
+    }
+    if (g_cfg.ai_explain) {
+        printf("AI 解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，探测成功 %d/%d。\n",best->ip,best->latency_ms,best->loss_rate,best->success_count,best->probe_count);
+    }
 }
 
 
@@ -666,10 +769,7 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     pthread_mutex_init(&rl.mu,NULL);
     int threads=cfg->task;
     if ((size_t)threads>ips->len)threads=(int)ips->len;
-    if (threads<=0) {
-        pthread_mutex_destroy(&rl.mu);
-        return rl;
-    }
+    if (threads<=0)return rl;
     pthread_t*tids=calloc((size_t)threads,sizeof(pthread_t));
     ScanCtx ctx= {
         .ips=ips->items,.total=ips->len,.results=&rl,.cfg=cfg
@@ -683,9 +783,9 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     i<threads;
     i++)pthread_join(tids[i],NULL);
     free(tids);
+    g_sort_mode=cfg->mode;
     qsort(rl.items,rl.len,sizeof(Result),cmp_result);
     if (rl.len>(size_t)cfg->ipnum)rl.len=(size_t)cfg->ipnum;
-    pthread_mutex_destroy(&rl.mu);
     return rl;
 }
 
@@ -749,7 +849,6 @@ static int rescan_and_select_ip(void) {
     pthread_mutex_lock(&g_ip_mu);
     g_current_ip[0]='\0';
     g_current_index=0;
-    atomic_store(&g_ip_mode_index,0);
     pthread_mutex_unlock(&g_ip_mu);
     const char*ipfile=g_cfg.ips_type==6?"ips-v6.txt":"ips-v4.txt";
     for (;
@@ -786,32 +885,6 @@ static void get_current_ip(char*out,size_t sz) {
     pthread_mutex_lock(&g_ip_mu);
     snprintf(out,sz,"%s",g_current_ip);
     pthread_mutex_unlock(&g_ip_mu);
-}
-
-
-static int choose_ip_for_connection(char*out,size_t sz) {
-    if (g_cfg.ip_mode==IP_MODE_BEST || g_cfg.ip_mode==IP_MODE_FIRST) {
-        get_current_ip(out,sz);
-        return out[0]?1:0;
-    }
-    pthread_mutex_lock(&g_ip_mu);
-    size_t count=g_candidate_count;
-    if (!g_candidates || count==0) {
-        pthread_mutex_unlock(&g_ip_mu);
-        out[0]='\0';
-        return 0;
-    }
-    size_t idx=0;
-    if (g_cfg.ip_mode==IP_MODE_ROTATE) {
-        idx=atomic_fetch_add(&g_ip_mode_index,1)%count;
-    }
-    else {
-        idx=(size_t)rand()%count;
-    }
-    snprintf(out,sz,"%s",g_candidates[idx].ip);
-    pthread_mutex_unlock(&g_ip_mu);
-    conn_msg("IP选择策略 %s 选择 IP: %s",ip_mode_name(g_cfg.ip_mode),out);
-    return out[0]?1:0;
 }
 
 
@@ -1006,7 +1079,6 @@ static void install_signals(void) {
 
 int main(int argc,char**argv) {
     parse_args(&g_cfg,argc,argv);
-    log_msg("IP选择策略: %s",ip_mode_name(g_cfg.ip_mode));
     install_signals();
     const char*ipfile=g_cfg.ips_type==6?"ips-v6.txt":"ips-v4.txt";
     const char**urls=g_cfg.ips_type==6?IPS_V6_URLS:IPS_V4_URLS;
@@ -1023,10 +1095,6 @@ int main(int argc,char**argv) {
     StringList ips=load_ip_list(ipfile,g_cfg.random_mode);
     if (ips.len==0) {
         log_msg("没有可扫描的 IP");
-        free(g_locations);
-#ifdef _WIN32
-        WSACleanup();
-#endif
         return 1;
     }
     long start=0;
@@ -1034,6 +1102,8 @@ int main(int argc,char**argv) {
         0
     }
     ;
+    char ai_reason[256]= {0};
+    int ai_confidence=0;
     for (;
     ;
     ) {
@@ -1048,32 +1118,49 @@ int main(int argc,char**argv) {
         }
         sleep(3);
     }
-    printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟\n");
+    if (g_cfg.ai_recommend&&!g_cfg.mode_explicit) {
+        g_cfg.mode=recommend_mode_from_results(&results,ai_reason,sizeof(ai_reason),&ai_confidence);
+        snprintf(g_cfg.mode_name,sizeof(g_cfg.mode_name),"%s",mode_name(g_cfg.mode));
+        g_sort_mode=g_cfg.mode;
+        qsort(results.items,results.len,sizeof(Result),cmp_result);
+    }
+    printf("候选池统计\n");
+    printf("当前模式: %s\n",g_cfg.mode_name);
+    printf("模式说明: %s\n",mode_summary(g_cfg.mode));
+    printf("候选总数: %zu\n",results.len);
+    if (g_cfg.ai_recommend) {
+        printf("AI 推荐模式: %s\n",g_cfg.mode_name);
+        printf("AI 推荐置信度: %d%%\n",ai_confidence);
+        printf("AI 推荐理由: %s\n",ai_reason[0]?ai_reason:"根据候选池统计自动推荐");
+    }
+    printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
     for (size_t i=0;
     i<results.len;
-    i++)printf("%s | %s | %s | %s | %d ms\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms);
+    i++)printf("%s | %s | %s | %s | %d ms | %d%% | %d/%d\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms,results.items[i].loss_rate,results.items[i].success_count,results.items[i].probe_count);
     printf("成功提取 %zu 个有效IP，耗时 %ld秒\n",results.len,(now_ms()-start)/1000);
-    strlist_free(&ips);
+    if (results.len>0) {
+        printf("最佳 IP: %s\n",results.items[0].ip);
+        printf("最佳延迟: %d ms\n",results.items[0].latency_ms);
+        printf("最佳丢包率: %d%%\n",results.items[0].loss_rate);
+        explain_selected_result(&results.items[0],ai_reason);
+    }
     g_candidates=results.items;
     g_candidate_count=results.len;
     if (!select_valid_ip()) {
         log_msg("没有有效的 IP 可用");
+        strlist_free(&ips);
         free(results.items);
-        free(g_locations);
-#ifdef _WIN32
-        WSACleanup();
-#endif
         return 1;
     }
     int lfd=listen_tcp(g_cfg.addr);
     if (lfd<0) {
         log_msg("无法监听 %s: %s",g_cfg.addr,strerror(errno));
+        strlist_free(&ips);
         free(results.items);
-        free(g_locations);
         return 1;
     }
     g_listen_fd=lfd;
-    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms);
+    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，模式：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.mode_name);
     pthread_t ht;
     create_small_thread(&ht,health_thread,NULL);
     while (atomic_load(&g_running)) {
@@ -1087,7 +1174,8 @@ int main(int argc,char**argv) {
             continue;
         }
         char ip[MAX_IP_LEN];
-        if (!choose_ip_for_connection(ip,sizeof(ip))) {
+        get_current_ip(ip,sizeof(ip));
+        if (!ip[0]) {
             close(cfd);
             continue;
         }
@@ -1112,6 +1200,7 @@ int main(int argc,char**argv) {
     if (lfd>=0)close(lfd);
     g_listen_fd=-1;
     pthread_join(ht,NULL);
+    strlist_free(&ips);
     free(results.items);
     free(g_locations);
     return 0;
