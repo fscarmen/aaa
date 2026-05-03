@@ -44,11 +44,12 @@ static const char *LOC_URLS[] =  {
 }
 ;
 typedef enum  {
-    MODE_RECOMMENDED=0,
-    MODE_SPEED,
-    MODE_STABILITY
+    SELECT_BEST=0,
+    SELECT_FIRST,
+    SELECT_ROTATE,
+    SELECT_RANDOM
 }
-ScanMode;
+SelectStrategy;
 typedef enum  {
     LOG_SILENT=0,
     LOG_ERROR,
@@ -58,9 +59,9 @@ typedef enum  {
 }
 LogLevel;
 typedef struct  {
-    char addr[64], colo[128], domain[256], mode_name[32], log_name[16];
-    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log, ai_recommend, ai_explain, mode_explicit;
-    ScanMode mode;
+    char addr[64], colo[128], domain[256], select_name[32], log_name[16];
+    int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log;
+    SelectStrategy select_strategy;
     LogLevel log_level;
 }
 Config;
@@ -223,28 +224,33 @@ static int sleep_interruptible_ms(int ms) {
 }
 
 
-static const char* mode_name(ScanMode mode) {
-    switch (mode) {
-        case MODE_SPEED:return "speed";
-        case MODE_STABILITY:return "stability";
-        case MODE_RECOMMENDED:
-        default:return "recommended";
+static const char* select_name(SelectStrategy strategy) {
+    switch (strategy) {
+        case SELECT_FIRST:return "first";
+        case SELECT_ROTATE:return "rotate";
+        case SELECT_RANDOM:return "random";
+        case SELECT_BEST:
+        default:return "best";
     }
 }
 
 
-static int parse_mode_value(const char *v, ScanMode *out) {
+static int parse_select_value(const char *v, SelectStrategy *out) {
     if (!v||!*v)return -1;
-    if (!strcasecmp(v,"recommended")) {
-        *out=MODE_RECOMMENDED;
+    if (!strcasecmp(v,"best")) {
+        *out=SELECT_BEST;
         return 0;
     }
-    if (!strcasecmp(v,"speed")) {
-        *out=MODE_SPEED;
+    if (!strcasecmp(v,"first")) {
+        *out=SELECT_FIRST;
         return 0;
     }
-    if (!strcasecmp(v,"stability")) {
-        *out=MODE_STABILITY;
+    if (!strcasecmp(v,"rotate")) {
+        *out=SELECT_ROTATE;
+        return 0;
+    }
+    if (!strcasecmp(v,"random")) {
+        *out=SELECT_RANDOM;
         return 0;
     }
     return -1;
@@ -258,7 +264,7 @@ static void usage(const char *p)  {
     printf("  -delay=value       有效延迟毫秒 (default 300)\n");
     printf("  -ipnum=value       提取的有效IP数量 (default 20)\n");
     printf("  -ips=value         指定IPv4还是IPv6 (4或6, C版优先IPv4)\n");
-    printf("  -mode=value        recommended=推荐模式, speed=最快模式, stability=最稳模式 (default recommended)\n");
+    printf("  -select=value      best=综合评分最优, first=固定首个可用, rotate=轮转候选, random=随机候选 (default best)\n");
     printf("  -log=value         日志级别: silent,error,warn,info,debug (default info)\n");
     printf("  -num=value         每个连接的目标连接尝试次数 (default 5)\n");
     printf("  -port=value        TLS 转发目标端口 (default 443)\n");
@@ -277,7 +283,7 @@ static void cfg_defaults(Config *c)  {
     memset(c,0,sizeof(*c));
     strcpy(c->addr,"0.0.0.0:1234");
     strcpy(c->domain,"cloudflaremirrors.com/debian");
-    strcpy(c->mode_name,"recommended");
+    strcpy(c->select_name,"best");
     strcpy(c->log_name,"info");
     c->code=200;
     c->delay_ms=300;
@@ -289,7 +295,7 @@ static void cfg_defaults(Config *c)  {
     c->random_mode=1;
     c->task=100;
     c->health_log=60;
-    c->mode=MODE_RECOMMENDED;
+    c->select_strategy=SELECT_BEST;
     c->log_level=LOG_INFO;
 }
 
@@ -321,13 +327,12 @@ static void parse_args(Config *c, int argc, char **argv)  {
         else if (!strcmp(key,"domain")&&val) snprintf(c->domain,sizeof(c->domain),"%s",val);
         else if (!strcmp(key,"ipnum")&&val) c->ipnum=atoi(val);
         else if (!strcmp(key,"ips")&&val) c->ips_type=atoi(val);
-        else if (!strcmp(key,"mode")&&val) {
-            if (parse_mode_value(val,&c->mode)!=0) {
-                fprintf(stderr,"非法 -mode=%s，可选值: recommended, speed, stability\n",val);
+        else if (!strcmp(key,"select")&&val) {
+            if (parse_select_value(val,&c->select_strategy)!=0) {
+                fprintf(stderr,"非法 -select=%s，可选值: best, first, rotate, random\n",val);
                 exit(1);
             }
-            snprintf(c->mode_name,sizeof(c->mode_name),"%s",mode_name(c->mode));
-            c->mode_explicit=1;
+            snprintf(c->select_name,sizeof(c->select_name),"%s",select_name(c->select_strategy));
         }
         else if (!strcmp(key,"log")&&val) {
             if (parse_log_level(val,&c->log_level)!=0) {
@@ -753,84 +758,39 @@ static void* scan_worker(void*arg) {
 }
 
 
-static ScanMode g_sort_mode=MODE_RECOMMENDED;
+static int score_result(const Result*r) {
+    return r->latency_ms*10+r->loss_rate*25;
+}
 
 
 static int cmp_result(const void*a,const void*b) {
     const Result*ra=(const Result*)a;
     const Result*rb=(const Result*)b;
-    if (g_sort_mode==MODE_SPEED) {
-        if (ra->latency_ms!=rb->latency_ms)return ra->latency_ms-rb->latency_ms;
-        return ra->loss_rate-rb->loss_rate;
-    }
-    if (g_sort_mode==MODE_STABILITY) {
-        if (ra->loss_rate!=rb->loss_rate)return ra->loss_rate-rb->loss_rate;
-        return ra->latency_ms-rb->latency_ms;
-    }
-    int delta=ra->latency_ms-rb->latency_ms;
-    if (delta<0)delta=-delta;
-    if (delta<=10&&ra->loss_rate!=rb->loss_rate)return ra->loss_rate-rb->loss_rate;
+    int sa=score_result(ra);
+    int sb=score_result(rb);
+    if (sa!=sb)return sa-sb;
     if (ra->latency_ms!=rb->latency_ms)return ra->latency_ms-rb->latency_ms;
     return ra->loss_rate-rb->loss_rate;
 }
 
 
-static ScanMode recommend_mode_from_results(const ResultList*rl,char*reason,size_t reason_sz,int*confidence) {
-    if (!rl||rl->len==0) {
-        if (reason&&reason_sz) snprintf(reason,reason_sz,"候选池为空，回退到 recommended");
-        if (confidence) *confidence=10;
-        return MODE_RECOMMENDED;
-    }
-    int min_latency=rl->items[0].latency_ms;
-    int min_loss=rl->items[0].loss_rate;
-    long total_latency=0;
-    long total_loss=0;
-    int unstable_count=0;
-    for (size_t i=0; i<rl->len; i++) {
-        const Result*r=&rl->items[i];
-        if (r->latency_ms<min_latency) min_latency=r->latency_ms;
-        if (r->loss_rate<min_loss) min_loss=r->loss_rate;
-        total_latency+=r->latency_ms;
-        total_loss+=r->loss_rate;
-        if (r->loss_rate>10) unstable_count++;
-    }
-    int avg_latency=(int)(total_latency/(long)rl->len);
-    int avg_loss=(int)(total_loss/(long)rl->len);
-    if (unstable_count>(int)(rl->len/3)||avg_loss>=8) {
-        if (reason&&reason_sz) snprintf(reason,reason_sz,"检测到候选池平均丢包偏高(%d%%)，优先稳定性",avg_loss);
-        if (confidence) *confidence=86;
-        return MODE_STABILITY;
-    }
-    if (min_latency<=avg_latency-20&&min_loss<=5) {
-        if (reason&&reason_sz) snprintf(reason,reason_sz,"检测到低延迟优势明显(最低 %d ms，平均 %d ms)",min_latency,avg_latency);
-        if (confidence) *confidence=78;
-        return MODE_SPEED;
-    }
-    if (reason&&reason_sz) snprintf(reason,reason_sz,"速度与稳定性差异都不极端，使用 recommended 平衡模式");
-    if (confidence) *confidence=72;
-    return MODE_RECOMMENDED;
-}
-
-
-static const char* mode_summary(ScanMode mode) {
-    switch (mode) {
-        case MODE_SPEED:return "speed=最快模式，优先最低延迟";
-        case MODE_STABILITY:return "stability=最稳模式，优先最低丢包";
-        case MODE_RECOMMENDED:
-        default:return "recommended=推荐模式，优先综合速度与稳定性";
+static const char* select_summary(SelectStrategy strategy) {
+    switch (strategy) {
+        case SELECT_FIRST:return "first=启动时固定首个可用 IP，失败后才切换";
+        case SELECT_ROTATE:return "rotate=按候选顺序轮转使用可用 IP";
+        case SELECT_RANDOM:return "random=每次连接从可用候选中随机选择 IP";
+        case SELECT_BEST:
+        default:return "best=按延迟和丢包率综合评分选择当前最优 IP";
     }
 }
 
 
-static void explain_selected_result(const Result*best,const char*ai_reason) {
+static void explain_selected_result(const Result*best) {
     if (!best)return;
     if (g_cfg.log_level<LOG_INFO) return;
-    printf("模式说明: %s\n",mode_summary(g_cfg.mode));
-    if (g_cfg.log_level>=LOG_INFO) {
-        printf("模式理由: %s\n",ai_reason&&*ai_reason?ai_reason:"根据候选池统计自动选择模式");
-    }
+    printf("选择策略: %s\n",select_summary(g_cfg.select_strategy));
     if (g_cfg.log_level>=LOG_DEBUG) {
-        printf("结果解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，探测成功 %d/%d。\n",best->ip,best->latency_ms,best->loss_rate,best->success_count,best->probe_count);
+        printf("结果解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，综合分 %d。\n",best->ip,best->latency_ms,best->loss_rate,score_result(best));
     }
 }
 
@@ -869,7 +829,6 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     i++)pthread_join(tids[i],NULL);
     free(tids);
     pthread_mutex_destroy(&rl.mu);
-    g_sort_mode=cfg->mode;
     qsort(rl.items,rl.len,sizeof(Result),cmp_result);
     if (rl.len>(size_t)cfg->ipnum)rl.len=(size_t)cfg->ipnum;
     return rl;
@@ -889,15 +848,22 @@ static int health_check_ip(const char*ip) {
 }
 
 
+static int set_current_candidate(size_t idx) {
+    if (idx>=g_candidate_count)return 0;
+    pthread_mutex_lock(&g_ip_mu);
+    snprintf(g_current_ip,sizeof(g_current_ip),"%s",g_candidates[idx].ip);
+    g_current_index=idx;
+    pthread_mutex_unlock(&g_ip_mu);
+    return 1;
+}
+
+
 static int select_valid_ip(void) {
     for (size_t i=0;
     i<g_candidate_count;
     i++) {
         if (health_check_ip(g_candidates[i].ip)) {
-            pthread_mutex_lock(&g_ip_mu);
-            snprintf(g_current_ip,sizeof(g_current_ip),"%s",g_candidates[i].ip);
-            g_current_index=i;
-            pthread_mutex_unlock(&g_ip_mu);
+            set_current_candidate(i);
             log_msg("可用 IP: %s (健康检查端口:%d)",g_candidates[i].ip,g_cfg.port);
             return 1;
         }
@@ -914,11 +880,54 @@ static int switch_next_ip(void) {
     i<g_candidate_count;
     i++) {
         if (health_check_ip(g_candidates[i].ip)) {
-            pthread_mutex_lock(&g_ip_mu);
-            snprintf(g_current_ip,sizeof(g_current_ip),"%s",g_candidates[i].ip);
-            g_current_index=i;
-            pthread_mutex_unlock(&g_ip_mu);
+            set_current_candidate(i);
             log_msg("切换到新的有效 IP: %s 更新 IP 索引: %zu",g_candidates[i].ip,i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+
+static int choose_ip_for_connection(char*out,size_t sz) {
+    if (!out||sz==0)return 0;
+    out[0]='\0';
+    if (g_candidate_count==0)return 0;
+    if (g_cfg.select_strategy==SELECT_FIRST) {
+        pthread_mutex_lock(&g_ip_mu);
+        snprintf(out,sz,"%s",g_current_ip);
+        pthread_mutex_unlock(&g_ip_mu);
+        return out[0]!=0;
+    }
+    if (g_cfg.select_strategy==SELECT_RANDOM) {
+        size_t start=(size_t)(rand()%((int)g_candidate_count));
+        for (size_t step=0; step<g_candidate_count; step++) {
+            size_t idx=(start+step)%g_candidate_count;
+            if (health_check_ip(g_candidates[idx].ip)) {
+                snprintf(out,sz,"%s",g_candidates[idx].ip);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (g_cfg.select_strategy==SELECT_ROTATE) {
+        pthread_mutex_lock(&g_ip_mu);
+        size_t start=g_current_index;
+        pthread_mutex_unlock(&g_ip_mu);
+        for (size_t step=1; step<=g_candidate_count; step++) {
+            size_t idx=(start+step)%g_candidate_count;
+            if (health_check_ip(g_candidates[idx].ip)) {
+                set_current_candidate(idx);
+                snprintf(out,sz,"%s",g_candidates[idx].ip);
+                return 1;
+            }
+        }
+        return 0;
+    }
+    for (size_t i=0; i<g_candidate_count; i++) {
+        if (health_check_ip(g_candidates[i].ip)) {
+            snprintf(out,sz,"%s",g_candidates[i].ip);
+            set_current_candidate(i);
             return 1;
         }
     }
@@ -1101,6 +1110,17 @@ static void* connection_thread(void*arg) {
 
 
 static int parse_addr(const char*addr,char*host,size_t hostsz,int*port) {
+    if (!addr||!host||!port)return-1;
+    if (addr[0]=='[') {
+        const char*end=strchr(addr,']');
+        if (!end||end[1]!=':')return-1;
+        size_t n=(size_t)(end-(addr+1));
+        if (n>=hostsz)n=hostsz-1;
+        memcpy(host,addr+1,n);
+        host[n]=0;
+        *port=atoi(end+2);
+        return *port>0?0:-1;
+    }
     const char*colon=strrchr(addr,':');
     if (!colon)return-1;
     size_t n=(size_t)(colon-addr);
@@ -1117,9 +1137,31 @@ static int listen_tcp(const char*addr) {
     char host[128];
     int port=0;
     if (parse_addr(addr,host,sizeof(host),&port)!=0)return-1;
+    int yes=1;
+    if (strchr(host,':')) {
+        int fd=socket(AF_INET6,SOCK_STREAM,0);
+        if (fd<0)return-1;
+        setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+        struct sockaddr_in6 sa6;
+        memset(&sa6,0,sizeof(sa6));
+        sa6.sin6_family=AF_INET6;
+        sa6.sin6_port=htons((uint16_t)port);
+        if (inet_pton(AF_INET6,host,&sa6.sin6_addr)!=1) {
+            close(fd);
+            return-1;
+        }
+        if (bind(fd,(struct sockaddr*)&sa6,sizeof(sa6))!=0) {
+            close(fd);
+            return-1;
+        }
+        if (listen(fd,1024)!=0) {
+            close(fd);
+            return-1;
+        }
+        return fd;
+    }
     int fd=socket(AF_INET,SOCK_STREAM,0);
     if (fd<0)return-1;
-    int yes=1;
     setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
     struct sockaddr_in sa;
     memset(&sa,0,sizeof(sa));
@@ -1188,8 +1230,6 @@ int main(int argc,char**argv) {
         0
     }
     ;
-    char ai_reason[256]= {0};
-    int ai_confidence=0;
     for (;
     ;
     ) {
@@ -1208,19 +1248,11 @@ int main(int argc,char**argv) {
             return 0;
         }
     }
-    if (!g_cfg.mode_explicit) {
-        g_cfg.mode=recommend_mode_from_results(&results,ai_reason,sizeof(ai_reason),&ai_confidence);
-        snprintf(g_cfg.mode_name,sizeof(g_cfg.mode_name),"%s",mode_name(g_cfg.mode));
-        g_sort_mode=g_cfg.mode;
-        qsort(results.items,results.len,sizeof(Result),cmp_result);
-    }
     printf("候选池统计\n");
-    printf("当前模式: %s\n",g_cfg.mode_name);
+    printf("当前策略: %s\n",g_cfg.select_name);
     printf("候选总数: %zu\n",results.len);
     if (g_cfg.log_level>=LOG_INFO) {
-        printf("模式说明: %s\n",mode_summary(g_cfg.mode));
-        printf("模式置信度: %d%%\n",ai_confidence);
-        printf("模式理由: %s\n",ai_reason[0]?ai_reason:"根据候选池统计自动推荐");
+        printf("策略说明: %s\n",select_summary(g_cfg.select_strategy));
     }
     printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
     for (size_t i=0;
@@ -1228,10 +1260,10 @@ int main(int argc,char**argv) {
     i++)printf("%s | %s | %s | %s | %d ms | %d%% | %d/%d\n",results.items[i].ip,results.items[i].data_center,results.items[i].region,results.items[i].city,results.items[i].latency_ms,results.items[i].loss_rate,results.items[i].success_count,results.items[i].probe_count);
     printf("成功提取 %zu 个有效IP，耗时 %ld秒\n",results.len,(now_ms()-start)/1000);
     if (results.len>0) {
-        printf("最佳 IP: %s\n",results.items[0].ip);
+        printf("评分最优 IP: %s\n",results.items[0].ip);
         printf("最佳延迟: %d ms\n",results.items[0].latency_ms);
         printf("最佳丢包率: %d%%\n",results.items[0].loss_rate);
-        explain_selected_result(&results.items[0],ai_reason);
+        explain_selected_result(&results.items[0]);
     }
     g_candidates=results.items;
     g_candidate_count=results.len;
@@ -1249,7 +1281,7 @@ int main(int argc,char**argv) {
         return 1;
     }
     g_listen_fd=lfd;
-    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，模式：%s，日志：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.mode_name,g_cfg.log_name);
+    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，策略：%s，日志：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.select_name,g_cfg.log_name);
     pthread_t ht;
     create_small_thread(&ht,health_thread,NULL);
     while (atomic_load(&g_running)) {
@@ -1263,8 +1295,7 @@ int main(int argc,char**argv) {
             continue;
         }
         char ip[MAX_IP_LEN];
-        get_current_ip(ip,sizeof(ip));
-        if (!ip[0]) {
+        if (!choose_ip_for_connection(ip,sizeof(ip))) {
             close(cfd);
             continue;
         }
