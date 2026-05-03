@@ -258,7 +258,7 @@ static void usage(const char *p)  {
     printf("  -delay=value       有效延迟毫秒 (default 300)\n");
     printf("  -ipnum=value       提取的有效IP数量 (default 20)\n");
     printf("  -ips=value         指定IPv4还是IPv6 (4或6, C版优先IPv4)\n");
-    printf("  -mode=value        recommended=推荐模式, speed=最快模式, stability=最稳模式\n");
+    printf("  -mode=value        recommended=推荐模式, speed=最快模式, stability=最稳模式 (default recommended)\n");
     printf("  -log=value         日志级别: silent,error,warn,info,debug (default info)\n");
     printf("  -num=value         每个连接的目标连接尝试次数 (default 5)\n");
     printf("  -port=value        TLS 转发目标端口 (default 443)\n");
@@ -843,20 +843,32 @@ static ResultList scan_ips(StringList*ips,Config*cfg) {
     pthread_mutex_init(&rl.mu,NULL);
     int threads=cfg->task;
     if ((size_t)threads>ips->len)threads=(int)ips->len;
-    if (threads<=0)return rl;
+    if (threads<=0) {
+        pthread_mutex_destroy(&rl.mu);
+        return rl;
+    }
     pthread_t*tids=calloc((size_t)threads,sizeof(pthread_t));
+    if (!tids) {
+        pthread_mutex_destroy(&rl.mu);
+        return rl;
+    }
     ScanCtx ctx= {
         .ips=ips->items,.total=ips->len,.results=&rl,.cfg=cfg
     }
     ;
     atomic_init(&ctx.index,0);
+    int created=0;
     for (int i=0;
     i<threads;
-    i++)pthread_create(&tids[i],NULL,scan_worker,&ctx);
+    i++) {
+        if (pthread_create(&tids[i],NULL,scan_worker,&ctx)!=0) break;
+        created++;
+    }
     for (int i=0;
-    i<threads;
+    i<created;
     i++)pthread_join(tids[i],NULL);
     free(tids);
+    pthread_mutex_destroy(&rl.mu);
     g_sort_mode=cfg->mode;
     qsort(rl.items,rl.len,sizeof(Result),cmp_result);
     if (rl.len>(size_t)cfg->ipnum)rl.len=(size_t)cfg->ipnum;
@@ -939,10 +951,7 @@ static int rescan_and_select_ip(void) {
         strlist_free(&ips);
         if (results.len==0) {
             warn_msg("重新扫描后仍未发现有效IP，3 秒后重试");
-            if (sleep_interruptible_ms(3000)!=0) {
-                strlist_free(&ips);
-                return 0;
-            }
+            if (sleep_interruptible_ms(3000)!=0) return 0;
             continue;
         }
         g_candidates=results.items;
@@ -1232,10 +1241,10 @@ int main(int argc,char**argv) {
         free(results.items);
         return 1;
     }
+    strlist_free(&ips);
     int lfd=listen_tcp(g_cfg.addr);
     if (lfd<0) {
         log_msg("无法监听 %s: %s",g_cfg.addr,strerror(errno));
-        strlist_free(&ips);
         free(results.items);
         return 1;
     }
@@ -1280,8 +1289,11 @@ int main(int argc,char**argv) {
     if (lfd>=0)close(lfd);
     g_listen_fd=-1;
     pthread_join(ht,NULL);
-    strlist_free(&ips);
     free(results.items);
+    g_candidates=NULL;
+    g_candidate_count=0;
     free(g_locations);
+    g_locations=NULL;
+    g_location_count=0;
     return 0;
 }
