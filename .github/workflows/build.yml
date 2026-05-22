@@ -224,7 +224,7 @@ jobs:
             -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
             -Wall -Wextra -Wno-unused-parameter \
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
-            -lws2_32 -lwinpthread -static -s
+            -lws2_32 -lwinpthread -ldnsapi -static -s
           file "dist/${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v7
         with:
@@ -263,7 +263,7 @@ jobs:
             -Wall -Wextra -Wno-unused-parameter \
             -arch ${{ matrix.arch }} -mmacosx-version-min=${{ matrix.minver }} \
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
-            -pthread
+            -pthread -lresolv
           strip "dist/${{ matrix.artifact }}" || true
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
