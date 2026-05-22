@@ -20,16 +20,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install ARM64 cross compiler and musl development files
+      - name: Install ARM64 cross compiler and musl environment
         run: |
+          # 1. 核心修复：添加 arm64 架构支持，否则 apt 找不到 :arm64 后缀的包
+          sudo dpkg --add-architecture arm64
           sudo apt-get update
-          # 安装 aarch64 交叉编译器，以及 musl 在 arm64 架构下的依赖库
+          
+          # 2. 安装交叉编译器以及跨平台 musl 依赖
           sudo apt-get install -y crossbuild-essential-arm64 musl-tools musl-dev:arm64
 
       - name: Build static ARM64 with musl
         run: |
-          # 1. 动态查找并适配 Ubuntu 系统中实际的 musl-gcc.specs 路径
-          # 2. 结合 -static 和 -lresolv 完美解决 DNS 函数符号未定义错误
+          # 动态查找 Ubuntu 系统中实际的 musl-gcc.specs 路径并完成编译
           SPECS_PATH=$(find /usr -name "musl-gcc.specs" 2>/dev/null | head -n 1)
           if [ -z "$SPECS_PATH" ]; then
             echo "未找到 musl-gcc.specs，尝试使用常规静态编译..."
