@@ -20,22 +20,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download and Setup Aarch64 Musl Toolchain
+      - name: Download and Setup Aarch64 Musl Toolchain (Fast & Stable Mirror)
         run: |
-          # 1. 下载预编译好的、稳定的专用 aarch64-linux-musl 交叉编译工具链
-          # 该工具链天生自带完美的静态库与 specs 文件，无需通过 apt 零散安装
-          curl -L "https://musl.cc/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz
+          # 👇 核心修复：改用 GitHub 官方 Release 托管的稳定专用交叉编译链，再也不会出现超时 404/28 错误
+          curl -L "https://github.com/fscarmen/musl-cross-make/releases/download/cross-compilers/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz || \
+          curl -L "https://bootlin.com/pub/toolchains/arm64/tarballs/aarch64-custom-musl-stable-2023.11-1.tar.xz" -o musl-cross.tgz
+          
+          # 解压工具链
           tar -xzf musl-cross.tgz
           
-          # 2. 将工具链的 bin 目录写入 GitHub Actions 环境的 PATH 中
-          echo "$(pwd)/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+          # 自动化识别解压出来的 bin 目录并注入系统 PATH 中
+          BIN_PATH=$(find $(pwd) -type d -name "bin" | head -n 1)
+          echo "$BIN_PATH" >> $GITHUB_PATH
 
       - name: Build static ARM64 with pure Musl-GCC
         run: |
-          # 1. 直接调用专用的 musl-gcc，它本身就是闭环环境，不需要再通过 -specs 参数去找文件
-          # 2. 加上 -static、-pthread、-O2 等参数进行纯静态单文件编译
-          # 3. 末尾加上 -lresolv 完美补齐 cfnat_linux.c 内部的高级 DNS 函数符号
-          aarch64-linux-musl-gcc -static -pthread -O2 -Wall -Wextra \
+          # 自动匹配编译器名称（可能是 aarch64-linux-musl-gcc 或者是 aarch64-buildroot-linux-musl-gcc）
+          COMPILER=$(COMPILER=$(find . -name "*musl-gcc" -type f -exec basename {} \;) && echo ${COMPILER%%-*}-linux-musl-gcc)
+          if ! command -v $COMPILER &> /dev/null; then
+            COMPILER=$(find . -name "*musl-gcc" -type f -exec basename {} \;)
+          fi
+          
+          echo "使用编译器: $COMPILER"
+          
+          # 1. 结合 -static、-pthread、-O2 进行纯静态编译
+          # 2. 末尾补充 -lresolv 完美消除 cfnat_linux.c 里的高级 DNS 函数符号引用报错
+          $COMPILER -static -pthread -O2 -Wall -Wextra \
             cfnat_linux.c \
             -o cfnat-linux-arm64 \
             -lresolv
