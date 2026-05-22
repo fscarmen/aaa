@@ -31,6 +31,13 @@
 #define MAX_NAME_LEN 64
 #define MAX_DOMAIN_LEN 256
 #define MAX_RESOLVER_LEN 64
+static const char *DEFAULT_SELECT_NAME = "best";
+#define DEFAULT_SELECT_STRATEGY SELECT_BEST
+static const char *DEFAULT_BAIDU_DOMAIN = "cloudnproxy.baidu.com";
+static const int DEFAULT_BAIDU_PORT = 443;
+static const char *DEFAULT_BAIDU_SCAN_TARGET = "myip.ipip.net:80";
+static const int DEFAULT_BAIDU_IPNUM = 12;
+static const char *DEFAULT_CARRIER_RESOLVERS = "";
 static const char *IPS_V4_URLS[] =  {
     "https://cdn.jsdelivr.net/gh/fscarmen/cfnat@main/ips-v4",
     "https://raw.githubusercontent.com/fscarmen/cfnat/main/ips-v4",
@@ -322,7 +329,6 @@ static void usage(const char *p)  {
     printf("  -delay=value              有效延迟毫秒 (default 300)\n");
     printf("  -ipnum=value              提取的有效IP数量 (default 20)\n");
     printf("  -ips=value                指定IPv4还是IPv6 (4或6, C版优先IPv4)\n");
-    printf("  -select=value             best=综合评分最优, first=固定首个可用, rotate=轮转候选, random=随机候选 (default best)\n");
     printf("  -log=value                日志级别: silent,error,warn,info,debug (default info)\n");
     printf("  -num=value                每个连接的目标连接尝试次数 (default 5)\n");
     printf("  -port=value               TLS 转发目标端口 (default 443)\n");
@@ -330,12 +336,7 @@ static void usage(const char *p)  {
     printf("  -random=value             是否随机生成IP (default true)\n");
     printf("  -task=value               扫描线程数 (default 100)\n");
     printf("  -baidu-proxy=value        是否启用百度前置代理 (default false)\n");
-    printf("  -baidu-domain=value       百度前置代理域名 (default cloudnproxy.baidu.com)\n");
-    printf("  -baidu-port=value         百度前置代理端口 (default 443)\n");
-    printf("  -baidu-scan-target=value  扫描百度前置代理时用于 CONNECT 的目标 (default myip.ipip.net:80)\n");
-    printf("  -baidu-ipnum=value        每个运营商保留的百度代理IP数量 (default 12)\n");
     printf("  -carrier-listens=value    运营商分池监听，例如 mobile=0.0.0.0:1234,telecom=0.0.0.0:1235\n");
-    printf("  -carrier-resolvers=value  自定义运营商DNS，例如 mobile=1.1.1.1|223.5.5.5,telecom=...\n");
 }
 
 
@@ -348,10 +349,11 @@ static void cfg_defaults(Config *c)  {
     memset(c,0,sizeof(*c));
     strcpy(c->addr,"0.0.0.0:1234");
     strcpy(c->domain,"cloudflaremirrors.com/debian");
-    strcpy(c->select_name,"best");
+    strcpy(c->select_name,DEFAULT_SELECT_NAME);
     strcpy(c->log_name,"info");
-    strcpy(c->baidu_domain,"cloudnproxy.baidu.com");
-    strcpy(c->baidu_scan_target,"myip.ipip.net:80");
+    strcpy(c->baidu_domain,DEFAULT_BAIDU_DOMAIN);
+    strcpy(c->baidu_scan_target,DEFAULT_BAIDU_SCAN_TARGET);
+    strcpy(c->carrier_resolvers,DEFAULT_CARRIER_RESOLVERS);
     c->code=200;
     c->delay_ms=300;
     c->ipnum=20;
@@ -363,9 +365,9 @@ static void cfg_defaults(Config *c)  {
     c->task=100;
     c->health_log=60;
     c->use_baidu_proxy=0;
-    c->baidu_port=443;
-    c->baidu_ipnum=12;
-    c->select_strategy=SELECT_BEST;
+    c->baidu_port=DEFAULT_BAIDU_PORT;
+    c->baidu_ipnum=DEFAULT_BAIDU_IPNUM;
+    c->select_strategy=DEFAULT_SELECT_STRATEGY;
     c->log_level=LOG_INFO;
 }
 
@@ -397,13 +399,6 @@ static void parse_args(Config *c, int argc, char **argv)  {
         else if (!strcmp(key,"domain")&&val) snprintf(c->domain,sizeof(c->domain),"%s",val);
         else if (!strcmp(key,"ipnum")&&val) c->ipnum=atoi(val);
         else if (!strcmp(key,"ips")&&val) c->ips_type=atoi(val);
-        else if (!strcmp(key,"select")&&val) {
-            if (parse_select_value(val,&c->select_strategy)!=0) {
-                fprintf(stderr,"非法 -select=%s，可选值: best, first, rotate, random\n",val);
-                exit(1);
-            }
-            snprintf(c->select_name,sizeof(c->select_name),"%s",select_name(c->select_strategy));
-        }
         else if (!strcmp(key,"log")&&val) {
             if (parse_log_level(val,&c->log_level)!=0) {
                 fprintf(stderr,"非法 -log=%s，可选值: silent, error, warn, info, debug\n",val);
@@ -418,12 +413,7 @@ static void parse_args(Config *c, int argc, char **argv)  {
         else if (!strcmp(key,"task")&&val) c->task=atoi(val);
         else if (!strcmp(key,"health-log")&&val) c->health_log=atoi(val);
         else if (!strcmp(key,"baidu-proxy")) c->use_baidu_proxy=parse_bool(val);
-        else if (!strcmp(key,"baidu-domain")&&val) snprintf(c->baidu_domain,sizeof(c->baidu_domain),"%s",val);
-        else if (!strcmp(key,"baidu-port")&&val) c->baidu_port=atoi(val);
-        else if (!strcmp(key,"baidu-scan-target")&&val) snprintf(c->baidu_scan_target,sizeof(c->baidu_scan_target),"%s",val);
-        else if (!strcmp(key,"baidu-ipnum")&&val) c->baidu_ipnum=atoi(val);
         else if (!strcmp(key,"carrier-listens")&&val) snprintf(c->carrier_listens,sizeof(c->carrier_listens),"%s",val);
-        else if (!strcmp(key,"carrier-resolvers")&&val) snprintf(c->carrier_resolvers,sizeof(c->carrier_resolvers),"%s",val);
     }
     if (c->delay_ms<=0)c->delay_ms=300;
     if (c->ipnum<=0)c->ipnum=20;
