@@ -18,22 +18,29 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Install ARM64 musl compiler
+      - name: Install ARM64 cross compiler and musl development files
         run: |
           sudo apt-get update
-          # 安装 crossbuild 基础依赖以及专为静态编译设计的 musl 工具链
-          sudo apt-get install -y crossbuild-essential-arm64 musl-tools
+          # 安装 aarch64 交叉编译器，以及 musl 在 arm64 架构下的依赖库
+          sudo apt-get install -y crossbuild-essential-arm64 musl-tools musl-dev:arm64
 
       - name: Build static ARM64 with musl
         run: |
-          # 1. 使用 gcc 配合 musl 规格文件进行完美的跨平台纯静态编译
-          # 2. 末尾必须加上 -lresolv 以成功补全 cfnat_linux.c 里的高级 DNS 函数符号
-          aarch64-linux-gnu-gcc -specs=/usr/share/musl/musl-gcc.specs -static -pthread -O2 -Wall -Wextra \
-            cfnat_linux.c \
-            -o cfnat-linux-arm64 \
-            -lresolv
+          # 1. 动态查找并适配 Ubuntu 系统中实际的 musl-gcc.specs 路径
+          # 2. 结合 -static 和 -lresolv 完美解决 DNS 函数符号未定义错误
+          SPECS_PATH=$(find /usr -name "musl-gcc.specs" 2>/dev/null | head -n 1)
+          if [ -z "$SPECS_PATH" ]; then
+            echo "未找到 musl-gcc.specs，尝试使用常规静态编译..."
+            aarch64-linux-gnu-gcc -static -pthread -O2 -Wall -Wextra cfnat_linux.c -o cfnat-linux-arm64 -lresolv
+          else
+            echo "找到 specs 文件路径: $SPECS_PATH"
+            aarch64-linux-gnu-gcc -specs="$SPECS_PATH" -static -pthread -O2 -Wall -Wextra \
+              cfnat_linux.c \
+              -o cfnat-linux-arm64 \
+              -lresolv
+          fi
 
       - name: Check binary
         run: |
