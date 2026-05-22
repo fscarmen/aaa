@@ -223,21 +223,21 @@ Cloudflare 返回什么字节 → cfnat 原样返回给客户端
 ### Linux
 
 ```bash
-gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c
+gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c -lresolv
 ./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 ```
 
 ### macOS
 
 ```bash
-clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c
+clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c -lresolv
 ./cfnat-macos -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 ```
 
 ### Windows（MinGW-w64）
 
 ```bash
-gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -static
+gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -ldnsapi -static
 cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 ```
 
@@ -267,8 +267,8 @@ cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 | `-task`            | 扫描线程数                                       | `100`                          |
 | `-health-log`      | 健康检查成功日志间隔秒数                         | `60`                           |
 | `-log`             | 日志级别：`silent`/`error`/`warn`/`info`/`debug` | `info`                         |
-| `-baidu-proxy`     | Linux 下是否启用百度前置代理                     | `false`                        |
-| `-carrier-listens` | Linux 下启用运营商分池监听                       | 空                             |
+| `-baidu-proxy`     | 是否启用百度前置代理                             | `false`                        |
+| `-carrier-listens` | 启用运营商分池监听                               | 空                             |
 
 ---
 
@@ -298,13 +298,13 @@ cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 ./cfnat-linux -ipnum=50 -task=200
 ```
 
-### 5. Linux 启用百度前置代理
+### 5. 启用百度前置代理
 
 ```bash
 ./cfnat-linux -baidu-proxy=true -addr=0.0.0.0:40000 -colo=HKG
 ```
 
-### 6. Linux 启用运营商分池监听
+### 6. 启用运营商分池监听
 
 ```bash
 ./cfnat-linux -baidu-proxy=true -carrier-listens="mobile=0.0.0.0:1234,telecom=0.0.0.0:1235,unicom=0.0.0.0:1236"
@@ -322,7 +322,7 @@ cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 - 每个运营商保留的百度代理节点数量
 - 运营商解析器配置字符串
 
-如果要调整这些值，直接修改 [`cfnat_linux.c`](cfnat_linux.c) 顶部常量即可。
+如果要调整这些值，直接修改 [`cfnat_linux.c`](cfnat_linux.c)、[`cfnat_macos.c`](cfnat_macos.c)、[`cfnat_windows.c`](cfnat_windows.c) 顶部常量即可。
 
 ---
 
@@ -394,59 +394,61 @@ cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 
 - 源文件：[`cfnat_linux.c`](cfnat_linux.c)
 - 使用 `pthread` + POSIX socket
+- 通过 `resolv` 做 DNS TXT / ASN 查询
 - 忽略 `SIGPIPE`，避免对端关闭时进程被信号打断
 
 ### macOS
 
 - 源文件：[`cfnat_macos.c`](cfnat_macos.c)
 - 同样基于 `pthread` + BSD socket
-- 用自定义大小写查找函数替代部分 GNU 扩展接口，兼容更稳
+- 同样支持百度前置代理、ASN 运营商识别、运营商分池与多监听
+- 链接时需要 `-lresolv`
 
 ### Windows
 
 - 源文件：[`cfnat_windows.c`](cfnat_windows.c)
-- 基于 Winsock2
+- 基于 Winsock2 + Windows DNS API
+- 同样支持百度前置代理、ASN 运营商识别、运营商分池与多监听
 - 需要先执行 `WSAStartup`
-- 下载远程文件时通过 PowerShell 完成
-- 构建时通常需要 `-lws2_32 -lwinpthread -static`
+- 构建时通常需要 `-lws2_32 -lwinpthread -ldnsapi -static`
 
 ### 当前实现取舍
 
-C 版保留了 Go 版的核心行为，但不是逐行等价复刻。当前重点是：
+C 版当前三平台已经尽量向同一功能面收敛。当前重点包括：
 
 - 扫描
 - 机房识别
 - 延迟+丢包综合评分
-- `select` 连接选择策略
 - 健康检查
 - 单端口转发
+- 百度前置代理
+- ASN 运营商识别
+- 运营商分池与多监听
 - 低内存运行
-
-这才是有价值的部分。其余细枝末节，如果会显著抬高内存和复杂度，就没必要强行搬过去。
 
 ---
 
 ## 构建方式
 
-- `cfnat_linux.c`：Linux 版本。使用 pthread 和 POSIX socket。
-- `cfnat_windows.c`：Windows 7+ 版本。使用 Winsock2 和 MinGW-w64 winpthread。
-- `cfnat_macos.c`：适用于 amd64 和 arm64 的 macOS 版本。
-- `build-all.yml`：用于 Linux、Windows 和 macOS 发布制品的 GitHub Actions 工作流。
+- `cfnat_linux.c`：Linux 版本。使用 pthread、POSIX socket 和 `resolv`。
+- `cfnat_windows.c`：Windows 7+ 版本。使用 Winsock2、Windows DNS API 和 MinGW-w64 `winpthread`。
+- `cfnat_macos.c`：适用于 amd64 和 arm64 的 macOS 版本，链接时需要 `-lresolv`。
+- [`build.yml`](.github/workflows/build.yml)：用于 Linux、Windows 和 macOS 发布制品的 GitHub Actions 工作流。
 
 仓库放置位置：
 
 ```text
-cfnat.c
+cfnat_linux.c
 cfnat_windows.c
 cfnat_macos.c
-.github/workflows/build-all.yml
+.github/workflows/build.yml
 ```
 
 Windows 构建说明：
 
 - 目标系统：通过 `_WIN32_WINNT=0x0601` 支持 Windows 7 或更高版本。
 - 编译器：MinGW-w64。
-- 链接库：`-lws2_32 -lwinpthread -static`。
+- 链接库：`-lws2_32 -lwinpthread -ldnsapi -static`。
 
 macOS 构建说明：
 
@@ -457,19 +459,19 @@ macOS 构建说明：
 ### Linux
 
 ```bash
-gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c
+gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c -lresolv
 ```
 
 ### macOS
 
 ```bash
-clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c
+clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c -lresolv
 ```
 
 ### Windows（MinGW-w64）
 
 ```bash
-gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -static
+gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -ldnsapi -static
 ```
 
 仓库内现有文件：
