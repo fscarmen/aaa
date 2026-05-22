@@ -20,38 +20,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download and Setup Aarch64 Musl Toolchain (Fast & Stable Mirror)
+      - name: Install Verified Aarch64 Cross Compiler
         run: |
-          # 👇 核心修复：改用 GitHub 官方 Release 托管的稳定专用交叉编译链，再也不会出现超时 404/28 错误
-          curl -L "https://github.com/fscarmen/musl-cross-make/releases/download/cross-compilers/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz || \
-          curl -L "https://bootlin.com/pub/toolchains/arm64/tarballs/aarch64-custom-musl-stable-2023.11-1.tar.xz" -o musl-cross.tgz
+          # 1. 更新标准宿主机源（100% 不会 404）
+          sudo apt-get update
           
-          # 解压工具链
-          tar -xzf musl-cross.tgz
-          
-          # 自动化识别解压出来的 bin 目录并注入系统 PATH 中
-          BIN_PATH=$(find $(pwd) -type d -name "bin" | head -n 1)
-          echo "$BIN_PATH" >> $GITHUB_PATH
+          # 2. 安装 Ubuntu 官方源里经过长期验证的 standard 交叉编译器
+          # 这样直接避开了任何第三方网站下载工具链带来的网络断线和解压格式问题
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Build static ARM64 with pure Musl-GCC
+      - name: Build static ARM64 Binary
         run: |
-          # 自动匹配编译器名称（可能是 aarch64-linux-musl-gcc 或者是 aarch64-buildroot-linux-musl-gcc）
-          COMPILER=$(COMPILER=$(find . -name "*musl-gcc" -type f -exec basename {} \;) && echo ${COMPILER%%-*}-linux-musl-gcc)
-          if ! command -v $COMPILER &> /dev/null; then
-            COMPILER=$(find . -name "*musl-gcc" -type f -exec basename {} \;)
-          fi
-          
-          echo "使用编译器: $COMPILER"
-          
-          # 1. 结合 -static、-pthread、-O2 进行纯静态编译
-          # 2. 末尾补充 -lresolv 完美消除 cfnat_linux.c 里的高级 DNS 函数符号引用报错
-          $COMPILER -static -pthread -O2 -Wall -Wextra \
+          # 1. 显式指定跨平台交叉编译器 aarch64-linux-gnu-gcc
+          # 2. 结合 -static、-pthread 进行纯静态闭环编译
+          # 3. 末尾加上 -lresolv 以完美补齐 cfnat_linux.c 中的 DNS 符号（如 res_ninit / ns_initparse 等）
+          aarch64-linux-gnu-gcc -static -pthread -O2 -Wall -Wextra \
             cfnat_linux.c \
             -o cfnat-linux-arm64 \
             -lresolv
 
-      - name: Check binary
+      - name: Verify Binary Architecture
         run: |
+          # 验证生成的二进制文件是否为真正的静态 ARM64 架构
           file cfnat-linux-arm64
           ls -lh cfnat-linux-arm64
 
