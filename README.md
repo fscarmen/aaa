@@ -1,139 +1,285 @@
 # cfnat C 版
 
-一个面向低内存环境的 Cloudflare IP 扫描 + 单端口 TCP 转发工具。
+面向低内存环境的 **Cloudflare IP 扫描 + 单端口 TCP 转发** 工具。
 
-C 版是对 cf中转群主的[`cfnat.go`](cfnat.go) 的移植实现。核心目标是保留扫描、优选、转发和健康检查能力的同时，将内存占用降至 Go 版的约 5%，专为路由器、OpenWrt、小内存 VPS 等资源受限环境打造。
+C 版基于 [`cfnat.go`](cfnat.go) 移植，目标不是把功能做得更复杂，而是在保留扫描、优选、转发、健康检查、百度前置代理和运营商分池等核心能力的同时，尽量降低常驻内存占用，适合 OpenWrt、路由器、小内存 VPS、ARM 小板机等资源受限环境。
+
+> `README-build.md` 的内容已经合并到本文档。后续维护以 `README.md` 为唯一说明文档。
 
 ---
 
 ## 目录
 
-- [项目简介](#项目简介)
+- [项目定位](#项目定位)
 - [核心特性](#核心特性)
-- [工作原理](#工作原理)
 - [快速开始](#快速开始)
-- [命令行参数](#命令行参数)
-- [使用示例](#使用示例)
-- [日志说明](#日志说明)
-- [内存与资源占用](#内存与资源占用)
-- [平台差异说明](#平台差异说明)
-- [构建方式](#构建方式)
+- [运行参数](#运行参数)
+- [常用示例](#常用示例)
+- [工作原理](#工作原理)
+- [百度前置代理与运营商分池](#百度前置代理与运营商分池)
+- [构建与发布](#构建与发布)
+- [仓库文件说明](#仓库文件说明)
+- [数据文件说明](#数据文件说明)
+- [日志与排错](#日志与排错)
+- [资源占用说明](#资源占用说明)
 - [常见问题](#常见问题)
 - [免责声明](#免责声明)
 
 ---
 
-## 项目简介
+## 项目定位
 
-cfnat C 版用于：
+cfnat C 版做三件事：
 
-- 扫描 Cloudflare IP
-- 按延迟筛选优质节点
-- 通过 `CF-RAY` 识别数据中心
-- 自动选择可用 IP
-- 提供单端口 TCP 转发
-- 自动识别 TLS / 非 TLS 流量并转发到不同目标端口
-- 定时健康检查并在 IP 失效时自动切换
+1. 扫描 Cloudflare IP，按数据中心、延迟、丢包率筛出候选节点。
+2. 在本机监听一个 TCP 端口，自动识别 TLS / 非 TLS 流量。
+3. 把客户端连接转发到当前可用的 Cloudflare 优选 IP，并在失败时自动切换。
 
-它不是 HTTP 反向代理，也不处理业务层协议，而是一个更轻量的 TCP 中转器。
+它不是 HTTP 反向代理，也不会解密或篡改业务数据。它只做 TCP 字节转发。
+
+典型链路：
+
+```text
+客户端
+  ↓
+cfnat 本地监听端口
+  ↓
+Cloudflare 优选 IP:443 或 :80
+```
+
+启用百度前置代理时：
+
+```text
+客户端
+  ↓
+cfnat 本地监听端口
+  ↓
+百度前置节点（HTTP CONNECT）
+  ↓
+Cloudflare 优选 IP:443 或 :80
+```
 
 ---
 
 ## 核心特性
 
-- 支持 IPv4 / IPv6 扫描参数入口
-- 支持 IPv4 监听与 IPv6 监听地址
-- 支持按 Cloudflare 数据中心筛选，例如 `HKG`、`SJC`、`LAX`
-- 候选 IP 按延迟和丢包率综合评分
-- 固定使用 `best` 综合最优策略，不再暴露多种候选选择参数
-- 自动健康检查 + 失效切换
-- 单端口同时承接 TLS / 非 TLS 流量
-- 自动协议识别，无需手工拆分监听端口
-- Linux / macOS / Windows 三平台实现
-- Linux 支持百度前置代理与运营商分池监听
-- 小线程栈设计，减少每连接内存占用
-- 统一五档日志级别 `-log=silent|error|warn|info|debug`
-- 适合路由器和小内存机器长期运行
+- 支持 IPv4 / IPv6 扫描入口。
+- 支持 IPv4 / IPv6 监听地址。
+- 支持按 Cloudflare 数据中心过滤，例如 `HKG`、`SJC`、`LAX`。
+- 候选 IP 按延迟和丢包率综合评分。
+- 固定使用 `best` 综合最优策略，已不再暴露 `-select` 参数。
+- 单端口同时承接 TLS 与非 TLS / HTTP 流量。
+- 根据客户端首字节自动分流到 `-port` 或 `-http-port`。
+- 支持定时健康检查与失败自动切换。
+- 支持百度前置代理。
+- 支持运营商分池监听，可按移动、电信、联通分别建立监听入口。
+- Linux / macOS / Windows 三平台实现。
+- Linux / macOS 使用 `pthread` + POSIX/BSD socket。
+- Windows 使用 Winsock2 + Windows DNS API + MinGW-w64 `winpthread`。
+- 统一日志级别：`silent`、`error`、`warn`、`info`、`debug`。
 
 ---
 
-## 工作原理
+## 快速开始
 
-cfnat C 版的目标很简单：**本地只监听一个端口，但同时接收 TLS 和非 TLS 流量，并自动转发到合适的 Cloudflare 目标端口。**
+### 1. 本地编译
 
-### 整体链路
+Linux：
 
-```text
-客户端
-  ↓
-本地监听端口（-addr，例如 0.0.0.0:40000）
-  ↓
-cfnat 自动识别连接类型
-  ↓
-Cloudflare 优选 IP
+```bash
+gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_linux.c -o ./cfnat-linux \
+  -pthread -lresolv
 ```
 
-### 单端口分流逻辑
+macOS：
 
-客户端只需要连接同一个本地端口，例如：
+```bash
+clang -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_macos.c -o ./cfnat-macos \
+  -pthread -lresolv
+```
+
+Windows（MinGW-w64）：
+
+```bash
+x86_64-w64-mingw32-gcc \
+  -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_windows.c -o ./cfnat.exe \
+  -lws2_32 -ldnsapi -lwinpthread -static -s
+```
+
+### 2. 启动
+
+Linux 示例：
+
+```bash
+./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+```
+
+macOS 示例：
+
+```bash
+./cfnat-macos -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+```
+
+Windows 示例：
+
+```bash
+cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+```
+
+### 3. 客户端访问
+
+客户端统一连接同一个端口：
 
 ```text
 服务器IP:40000
 ```
 
-程序接收连接后，会先读取客户端首字节：
+程序会自动识别连接类型：
 
 ```text
-首字节是 0x16  → 认为是 TLS 流量
-其他情况       → 认为是非 TLS / HTTP 流量
+TLS 流量           → Cloudflare IP:443
+非 TLS / HTTP 流量 → Cloudflare IP:80
 ```
 
-然后分别转发到不同的 Cloudflare 目标端口：
+---
+
+## 运行参数
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `-addr` | 本地监听地址，例如 `0.0.0.0:1234` 或 `[::]:1234` | `0.0.0.0:1234` |
+| `-colo` | Cloudflare 数据中心过滤，多个用逗号分隔，例如 `HKG,SJC,LAX` | 空 |
+| `-delay` | 有效延迟阈值，单位毫秒 | `300` |
+| `-ipnum` | 保留的候选 IP 数量 | `20` |
+| `-ips` | 扫描 IPv4 或 IPv6，取值 `4` 或 `6` | `4` |
+| `-num` | 每个客户端连接的目标连接尝试次数 | `5` |
+| `-port` | TLS 流量转发目标端口 | `443` |
+| `-http-port` | 非 TLS / HTTP 流量转发目标端口 | `80` |
+| `-random` | 是否从 CIDR 随机抽样 IP | `true` |
+| `-task` | 扫描线程数，上限为 `512` | `100` |
+| `-code` | HTTP / HTTPS 探测期望状态码 | `200` |
+| `-domain` | 健康检查目标域名与路径 | `cloudflaremirrors.com/debian` |
+| `-health-log` | 健康检查成功日志输出间隔，单位秒；设为 `0` 可关闭成功日志 | `60` |
+| `-log` | 日志级别：`silent`、`error`、`warn`、`info`、`debug` | `info` |
+| `-baidu-proxy` | 是否启用百度前置代理 | `false` |
+| `-carrier-listens` | 运营商分池监听配置 | 空 |
+
+### 已固定为源码常量的项目
+
+为了减少参数污染，以下配置不再作为命令行参数暴露，而是放在三个 C 源文件顶部：
+
+| 配置 | 源码常量 |
+| --- | --- |
+| 百度前置代理域名 | `DEFAULT_BAIDU_DOMAIN` |
+| 百度前置代理端口 | `DEFAULT_BAIDU_PORT` |
+| 百度代理扫描目标 | `DEFAULT_BAIDU_SCAN_TARGET` |
+| 每个百度代理池保留节点数 | `DEFAULT_BAIDU_IPNUM` |
+| 运营商解析器配置 | `DEFAULT_CARRIER_RESOLVERS` |
+| 连接选择策略 | `DEFAULT_SELECT_STRATEGY`，当前固定为 `best` |
+
+需要调整这些值时，直接修改对应平台源码顶部的默认常量：
 
 ```text
-TLS 流量
-  客户端 → 本地端口 → cfnat → Cloudflare IP:443
-
-非 TLS / HTTP 流量
-  客户端 → 本地端口 → cfnat → Cloudflare IP:80
+cfnat_linux.c
+cfnat_macos.c
+cfnat_windows.c
 ```
 
-### IP 扫描与筛选流程
+---
 
-#### 1. 获取 IP 段
+## 常用示例
 
-程序优先读取本地文件：
+### 扫描香港机房并监听单端口
+
+```bash
+./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+```
+
+### 同时接受多个数据中心
+
+```bash
+./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG,SJC,LAX -delay=120
+```
+
+### 使用 IPv6 扫描源
+
+```bash
+./cfnat-linux -addr=[::]:40000 -ips=6 -colo=HKG -delay=120
+```
+
+### 打开调试日志
+
+```bash
+./cfnat-linux -log=debug
+```
+
+### 提高候选池规模和扫描并发
+
+```bash
+./cfnat-linux -ipnum=50 -task=200
+```
+
+### 启用百度前置代理
+
+```bash
+./cfnat-linux -baidu-proxy=true -addr=0.0.0.0:40000 -colo=HKG
+```
+
+### 启用运营商分池监听
+
+```bash
+./cfnat-linux \
+  -baidu-proxy=true \
+  -carrier-listens="mobile=0.0.0.0:1234,telecom=0.0.0.0:1235,unicom=0.0.0.0:1236"
+```
+
+分池模式下，可以给不同运营商分配不同本地入口：
 
 ```text
-ips-v4.txt
-ips-v6.txt
-locations.json
+移动用户 → 服务器IP:1234
+电信用户 → 服务器IP:1235
+联通用户 → 服务器IP:1236
 ```
 
-如果缺失，会自动下载。
+---
 
-#### 2. 生成待测 IP
+## 工作原理
+
+### 1. 加载 IP 段
+
+程序启动后根据 `-ips` 选择 IPv4 或 IPv6 扫描源：
+
+```text
+-ips=4 → IPv4
+-ips=6 → IPv6
+```
+
+本地数据文件不存在时，会尝试自动下载。
+
+### 2. 生成待测 IP
 
 根据 `-random` 决定扫描方式：
 
 ```text
 -random=true   从每个 CIDR 随机抽取 IP
--random=false  将 CIDR 展开后逐个测试
+-random=false  展开 CIDR 后按顺序测试
 ```
 
-#### 3. TCP 连通性测试
+### 3. TCP 连通性测试
 
-对待测 IP 先连接 `80` 端口，记录 TCP 建连耗时，作为基础延迟。
+对待测 IP 发起 TCP 连接测试，并记录建连耗时。
 
-#### 4. 识别数据中心
+这个耗时会作为基础延迟，后续用于候选评分。
 
-向目标 IP 发送 HTTP 请求，从响应头提取：
+### 4. 识别 Cloudflare 数据中心
 
-```text
-CF-RAY
-```
+程序向目标 IP 发起 HTTP 探测，并从响应头中读取 `CF-RAY`。
 
-例如：
+示例：
 
 ```text
 xxxx-HKG
@@ -141,9 +287,9 @@ xxxx-SJC
 xxxx-LAX
 ```
 
-程序会读取后缀机房代码，并结合 `locations.json` 映射地区和城市信息。
+后缀就是 Cloudflare 数据中心代码。程序会结合 `locations.json` 映射地区与城市信息。
 
-#### 5. 按 `-colo` 过滤
+### 5. 按 `-colo` 过滤
 
 如果指定：
 
@@ -151,191 +297,295 @@ xxxx-LAX
 -colo=HKG,SJC,LAX
 ```
 
-则只保留匹配机房的结果。
+程序只保留匹配这些数据中心的结果。
 
-#### 6. 候选评分
+不指定 `-colo` 时，不按数据中心过滤。
 
-有效结果会根据延迟和丢包率计算综合分，分数越低越优，并只保留前 `-ipnum` 个候选。
+### 6. 综合评分
 
-一个简化理解是：
+候选 IP 会根据延迟和丢包率计算综合分，分数越低越优。
+
+可以近似理解为：
 
 ```text
 score = latency * 10 + loss_rate * 25
 ```
 
-也就是说，这一版不是只看“谁延迟最低”，而是把“快”和“稳”一起算。
+所以当前策略不是单纯选择最低延迟，而是同时考虑速度和稳定性。
 
-#### 7. 健康检查
+### 7. 健康检查
 
-候选 IP 还会通过目标 TLS 端口做存活检查，只有通过检查的 IP 才会成为当前转发 IP。
+程序会对候选 IP 做目标端口健康检查。
 
-#### 8. 自动切换
+只有健康检查通过的 IP 才会成为当前转发 IP。
 
-运行期间每 10 秒检查一次当前 IP，连续失败两次就切换到下一个可用候选。
+### 8. 自动切换
 
-### 百度前置代理的作用与原理
+运行期间会定时检查当前 IP。
 
-百度前置代理不是为了“让结果更快看起来更高级”，而是为了在某些网络环境里给 Cloudflare 转发链路多加一层前置出口。
+当当前 IP 连续失败两次后，程序会切换到下一个可用候选；如果候选池耗尽，会重新扫描。
 
-它的作用可以直接理解为：
+### 9. 单端口自动分流
 
-- 扫描阶段：不是本机直连 Cloudflare IP，而是优先通过百度前置节点去探测目标
-- 转发阶段：客户端流量也可以先进百度前置，再由前置节点去连 Cloudflare IP
-- 运营商分池场景：可以按移动、电信、联通分别建立各自更贴近的前置节点池
+客户端只需要连接同一个本地端口。程序接收连接后读取客户端首字节：
 
-简化链路如下：
+```text
+首字节是 0x16 → 认为是 TLS 流量
+其他情况      → 认为是非 TLS / HTTP 流量
+```
+
+然后转发到不同目标端口：
+
+```text
+TLS 流量           → Cloudflare IP:-port
+非 TLS / HTTP 流量 → Cloudflare IP:-http-port
+```
+
+默认等价于：
+
+```text
+TLS 流量           → Cloudflare IP:443
+非 TLS / HTTP 流量 → Cloudflare IP:80
+```
+
+---
+
+## 百度前置代理与运营商分池
+
+### 百度前置代理
+
+启用 `-baidu-proxy=true` 后，扫描和转发会通过百度前置节点建立 HTTP CONNECT 链路。
+
+简化链路：
 
 ```text
 客户端
   ↓
 cfnat
   ↓
-百度前置节点（HTTP CONNECT）
+百度前置节点
   ↓
-Cloudflare IP:443 / :80
+Cloudflare IP
 ```
 
-这样做的典型意义是：
+这个模式适合本机直连 Cloudflare 不稳定、但经前置节点链路更稳定的网络环境。
 
-- 某些地区本机直连 Cloudflare 不稳定，但经百度前置中转后更容易拿到可用链路
-- 不同运营商到前置节点的路径不同，分池后更容易减少串线和劣化
-- 扫描结果和实际转发路径保持一致，避免“扫得通、转发不稳”这种偏差
+注意：百度前置代理不是万能加速器。它的价值在于让扫描路径和实际转发路径尽量一致，减少“扫得通但转发不稳”的偏差。
 
-它不是万能加速器，但在特定网络环境下，能明显提高可用率和稳定性。
+### 运营商分池
 
-### 数据转发方式
+启用 `-carrier-listens` 后，程序可以按运营商建立独立监听入口和独立候选池。
 
-cfnat C 版不会解密 TLS，也不会篡改 HTTP 内容。
+示例：
 
-它只做 TCP 字节转发：
+```bash
+-carrier-listens="mobile=0.0.0.0:1234,telecom=0.0.0.0:1235,unicom=0.0.0.0:1236"
+```
+
+典型用途：
+
+- 移动、电信、联通到前置节点的路径差异明显。
+- 单一候选池容易出现某个运营商可用、另一个运营商劣化。
+- 想给不同入口分别维护更贴近各自网络路径的候选 IP。
+
+---
+
+## 构建与发布
+
+本仓库当前维护三个 C 入口文件：
+
+| 平台 | 源文件 | 主要依赖 |
+| --- | --- | --- |
+| Linux | [`cfnat_linux.c`](cfnat_linux.c) | `pthread`、POSIX socket、`resolv` |
+| macOS | [`cfnat_macos.c`](cfnat_macos.c) | `pthread`、BSD socket、`resolv` |
+| Windows | [`cfnat_windows.c`](cfnat_windows.c) | Winsock2、Windows DNS API、`winpthread` |
+
+### Linux 构建
+
+```bash
+gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_linux.c -o ./cfnat-linux \
+  -pthread -lresolv
+```
+
+如需尽量静态链接：
+
+```bash
+gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_linux.c -o ./cfnat-linux \
+  -pthread -lresolv -static -s
+```
+
+说明：
+
+- Linux 版使用 DNS TXT 查询做 ASN / 运营商识别。
+- 因此链接时必须带上 `-lresolv`。
+- 不同交叉编译工具链对完全静态链接支持不一致，失败时先去掉 `-static` 验证源码本身是否可编译。
+
+### macOS 构建
+
+```bash
+clang -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_macos.c -o ./cfnat-macos \
+  -pthread -lresolv
+```
+
+交叉指定架构示例：
+
+```bash
+clang -O2 -pipe -std=c11 \
+  -arch x86_64 -mmacosx-version-min=10.13 \
+  ./cfnat_macos.c -o ./cfnat-darwin-amd64 \
+  -pthread -lresolv
+```
+
+```bash
+clang -O2 -pipe -std=c11 \
+  -arch arm64 -mmacosx-version-min=11.0 \
+  ./cfnat_macos.c -o ./cfnat-darwin-arm64 \
+  -pthread -lresolv
+```
+
+说明：
+
+- macOS amd64 最低目标可设为 `10.13`。
+- macOS arm64 最低目标通常设为 `11.0`，因为 Apple Silicon 从 macOS 11 开始支持。
+- macOS 不支持像 Linux musl 那样生成完全静态的系统 libc 二进制。
+- macOS 版同样使用 DNS TXT / ASN 查询，因此也需要 `-lresolv`。
+
+### Windows 构建
+
+64 位：
+
+```bash
+x86_64-w64-mingw32-gcc \
+  -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_windows.c -o ./cfnat-windows-amd64.exe \
+  -lws2_32 -ldnsapi -lwinpthread -static -s
+```
+
+32 位：
+
+```bash
+i686-w64-mingw32-gcc \
+  -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_windows.c -o ./cfnat-windows-386.exe \
+  -lws2_32 -ldnsapi -lwinpthread -static -s
+```
+
+说明：
+
+- `_WIN32_WINNT=0x0601` 表示目标为 Windows 7 或更高版本。
+- Windows 网络层使用 Winsock2，因此需要 `-lws2_32`。
+- Windows TXT 查询使用 `DnsQuery_A()` / `DnsFree()`，因此需要 `-ldnsapi`。
+- Windows 线程兼容层使用 MinGW-w64 `winpthread`，因此需要 `-lwinpthread`。
+
+### GitHub Actions
+
+多平台构建工作流位于：
 
 ```text
-客户端发什么字节 → cfnat 原样转发给 Cloudflare IP
-Cloudflare 返回什么字节 → cfnat 原样返回给客户端
+.github/workflows/build.yml
 ```
 
-所以它本质上是轻量级 TCP relay，不是七层代理。
+当前工作流包含：
+
+- Linux：amd64、386、armv5、armv6、armv7、arm64、mips、mipsel、mips64、mips64el、ppc64、ppc64le、riscv64、s390x、loongarch64。
+- Windows：amd64、386。
+- macOS：amd64、arm64。
+- tag 触发发布：推送 `v*` 标签后打包 release 文件和校验和。
+- 手动触发：支持 `workflow_dispatch`。
+
+发布包会把二进制文件放入 `bin/`，并附带源码、README 和基础数据文件。
+
+### 常见构建失败
+
+| 现象 | 原因 | 修复 |
+| --- | --- | --- |
+| macOS 出现 `_res_9_query`、`_res_9_ns_initparse`、`_res_9_ns_parserr` undefined symbols | 没有链接 resolver 库 | 在链接参数末尾加 `-lresolv` |
+| Linux 出现 `res_query`、`ns_initparse`、`ns_parserr` undefined reference | 没有链接 resolver 库 | 在链接参数末尾加 `-lresolv` |
+| Windows 出现 `undefined reference to DnsQuery_A` / `DnsFree` | 没有链接 Windows DNS API | 在链接参数末尾加 `-ldnsapi` |
+| Windows 出现 Winsock 相关 undefined reference | 没有链接 Winsock2 | 加 `-lws2_32` |
+| 出现 `select_name`、`parse_select_value`、`select_summary` unused warning | `-select` 已移除，遗留辅助函数未被调用 | 不影响链接；追求干净日志时可删除遗留函数 |
+| Windows 出现 `SOCKET` 与 `< 0` / `>= 0` 比较 warning | Windows `SOCKET` 是无符号类型，应使用 `INVALID_SOCKET` 判断 | 不一定导致编译失败；如开启 `-Werror` 需修正判断方式 |
 
 ---
 
-## 快速开始
-
-### Linux
-
-```bash
-gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c -lresolv
-./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
-```
-
-### macOS
-
-```bash
-clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c -lresolv
-./cfnat-macos -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
-```
-
-### Windows（MinGW-w64）
-
-```bash
-gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -ldnsapi -static
-cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
-```
-
-访问方式：
+## 仓库文件说明
 
 ```text
-服务器IP:40000
+cfnat.go                         Go 版实现 / 参考实现
+cfnat-origin.go                  原始 Go 版留档
+cfnat_linux.c                    Linux C 版入口
+cfnat_macos.c                    macOS C 版入口
+cfnat_windows.c                  Windows C 版入口
+ips-v4                           上游 IPv4 数据文件
+ips-v6                           上游 IPv6 数据文件
+locations                        上游 Cloudflare 数据中心位置文件
+README.md                        主说明文档
+.github/workflows/build.yml      C 版多平台构建工作流
+.github/workflows/build_go.yml   Go 版构建工作流
 ```
+
+`README-build.md` 已合并进本文件，不再单独维护，避免构建说明和主文档互相漂移。
 
 ---
 
-## 命令行参数
+## 数据文件说明
 
-| 参数               | 说明                                             | 默认值                         |
-| ------------------ | ------------------------------------------------ | ------------------------------ |
-| `-addr`            | 本地监听地址，支持 IPv4，例如 `0.0.0.0:1234`     | `0.0.0.0:1234`                 |
-| `-code`            | HTTP/HTTPS 期望状态码                            | `200`                          |
-| `-colo`            | 数据中心筛选，多个用逗号分隔                     | 空                             |
-| `-delay`           | 有效延迟阈值，单位毫秒                           | `300`                          |
-| `-domain`          | 健康检查目标域名/路径                            | `cloudflaremirrors.com/debian` |
-| `-ipnum`           | 保留候选 IP 数量                                 | `20`                           |
-| `-ips`             | 选择 IPv4 或 IPv6 扫描源                         | `4`                            |
-| `-num`             | 每个连接的目标连接尝试次数                       | `5`                            |
-| `-port`            | TLS 转发目标端口                                 | `443`                          |
-| `-http-port`       | 非 TLS 转发目标端口                              | `80`                           |
-| `-random`          | 是否随机生成 IP                                  | `true`                         |
-| `-task`            | 扫描线程数                                       | `100`                          |
-| `-health-log`      | 健康检查成功日志间隔秒数                         | `60`                           |
-| `-log`             | 日志级别：`silent`/`error`/`warn`/`info`/`debug` | `info`                         |
-| `-baidu-proxy`     | 是否启用百度前置代理                             | `false`                        |
-| `-carrier-listens` | 启用运营商分池监听                               | 空                             |
+源码运行时会查找以下本地文件：
+
+```text
+ips-v4.txt
+ips-v6.txt
+locations.json
+```
+
+如果文件不存在，程序会自动从上游地址下载并保存为上述文件名。
+
+仓库中也可能保留上游原始数据文件：
+
+```text
+ips-v4
+ips-v6
+locations
+```
+
+离线运行时可以手动复制：
+
+```bash
+cp ips-v4 ips-v4.txt
+cp ips-v6 ips-v6.txt
+cp locations locations.json
+```
+
+这样可以避免启动时依赖网络下载基础数据。
 
 ---
 
-## 使用示例
+## 日志与排错
 
-### 1. 扫描香港机房并监听单端口
+### 日志级别
 
-```bash
-./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG -delay=80 -random=false
+```text
+-log=silent  不输出普通日志
+-log=error   仅输出错误
+-log=warn    输出警告和错误
+-log=info    输出常规运行日志
+-log=debug   输出调试信息
 ```
 
-### 2. 同时接受多个地区
-
-```bash
-./cfnat-linux -addr=0.0.0.0:40000 -colo=HKG,SJC,LAX -delay=120
-```
-
-### 3. 打开调试日志排查
-
-```bash
-./cfnat-linux -log=debug
-```
-
-### 4. 提高候选池规模
-
-```bash
-./cfnat-linux -ipnum=50 -task=200
-```
-
-### 5. 启用百度前置代理
-
-```bash
-./cfnat-linux -baidu-proxy=true -addr=0.0.0.0:40000 -colo=HKG
-```
-
-### 6. 启用运营商分池监听
-
-```bash
-./cfnat-linux -baidu-proxy=true -carrier-listens="mobile=0.0.0.0:1234,telecom=0.0.0.0:1235,unicom=0.0.0.0:1236"
-```
-
----
-
-## 内置固定项
-
-为了减少参数污染，以下内容已经改为代码顶部硬编码常量，不再作为命令行参数暴露：
-
-- 百度前置代理域名
-- 百度前置代理端口
-- 百度代理扫描 CONNECT 目标
-- 每个运营商保留的百度代理节点数量
-- 运营商解析器配置字符串
-
-如果要调整这些值，直接修改 [`cfnat_linux.c`](cfnat_linux.c)、[`cfnat_macos.c`](cfnat_macos.c)、[`cfnat_windows.c`](cfnat_windows.c) 顶部常量即可。
-
----
-
-## 日志说明
-
-### 正常输出
+### 正常日志示例
 
 ```text
 可用 IP: 104.18.x.x (健康检查端口:443)
+正在监听 0.0.0.0:40000，TLS目标端口：443，非TLS目标端口：80
 状态检查成功: 当前 IP 104.18.x.x 可用
 ```
 
-### 异常输出
+### 自动切换日志示例
 
 ```text
 状态检查失败 (1/2): 当前 IP 104.18.x.x 暂不可用
@@ -343,178 +593,90 @@ cfnat.exe -addr=0.0.0.0:40000 -colo=HKG -delay=50 -random=false
 切换到新的有效 IP: 104.18.x.x 更新 IP 索引: 3
 ```
 
-### 没扫到结果
+### 没有扫到有效 IP
 
 ```text
-未发现有效IP，可尝试放宽 -delay 或开启 -log=debug 查看细节
+未发现有效IP，可尝试放宽 -delay 或提高 -log=debug 查看细节，3 秒后重试
 ```
+
+建议按下面顺序排查：
+
+1. 放宽延迟限制，例如 `-delay=300` 或更高。
+2. 暂时去掉 `-colo`，确认不是数据中心过滤过严。
+3. 使用 `-random=false` 做更完整的 CIDR 扫描。
+4. 提高扫描并发，例如 `-task=200`。
+5. 开启 `-log=debug` 查看失败阶段。
+6. 网络直连 Cloudflare 不稳定时，尝试 `-baidu-proxy=true`。
 
 ---
 
-## 内存与资源占用
+## 资源占用说明
 
-这部分才是 C 版真正该看的，不然你移植它干什么。
+C 版的核心价值是降低常驻资源占用。
 
-### 结论
+相较于 Go 版，C 版没有 Go 运行时、GC 和 goroutine 调度器的额外常驻成本，并在实现上做了更保守的资源控制：
 
-**C 版内存占用约为 Go 版的 5%。**
+- 双向转发缓冲区固定为 `16 KB`。
+- 每个转发方向使用固定缓冲区。
+- 连接线程使用较小栈空间。
+- 候选结果只保留必要字段。
+- 使用原生 `pthread` / Winsock / BSD socket。
+- 健康检查逻辑固定频率执行，不引入复杂后台状态机。
 
-也可以换个更直白的说法：
+更适合：
 
-- Go 版更适合快速开发、维护和扩展
-- C 版更适合把资源压到极低，尤其是常驻运行场景
+- OpenWrt / ImmortalWrt 路由器。
+- 小内存 VPS。
+- ARM 小板机。
+- 需要长期驻留的网络中转环境。
+- 连接数波动较大但希望内存可控的场景。
 
-### 为什么 C 版更省内存
-
-相较于 [`cfnat.go`](cfnat.go)，C 版没有 Go 运行时、GC 和 goroutine 调度器的额外常驻成本，同时在实现上做了更保守的资源控制：
-
-- 双向转发缓冲区固定为 `16 KB`，定义见 [`COPY_BUF_SIZE`](cfnat_linux.c:28)
-- 每个转发方向使用固定栈上缓冲，而不是动态分配对象池
-- 连接线程显式设置为 `64 KB` 小栈，见 [`create_small_thread()`](cfnat_linux.c:127)
-- 候选结果只保留必要字段，不引入更重的数据结构
-- 采用原生 `pthread` / Winsock / BSD socket，减少运行时抽象层
-- 健康检查逻辑直接、固定频率，不引入复杂状态机或额外后台组件
-
-### 适用场景
-
-如果你的设备属于下面这些情况，C 版比 Go 版更像正解：
-
-- OpenWrt / ImmortalWrt 路由器
-- 小内存 VPS
-- ARM 小板机
-- 需要长期驻留、连接数波动较大的网络中转环境
-
-如果你机器内存富余，只是为了“看起来更底层”，那不是需求，那是情绪。
-
----
-
-## 平台差异说明
-
-### Linux
-
-- 源文件：[`cfnat_linux.c`](cfnat_linux.c)
-- 使用 `pthread` + POSIX socket
-- 通过 `resolv` 做 DNS TXT / ASN 查询
-- 忽略 `SIGPIPE`，避免对端关闭时进程被信号打断
-
-### macOS
-
-- 源文件：[`cfnat_macos.c`](cfnat_macos.c)
-- 同样基于 `pthread` + BSD socket
-- 同样支持百度前置代理、ASN 运营商识别、运营商分池与多监听
-- 链接时需要 `-lresolv`
-
-### Windows
-
-- 源文件：[`cfnat_windows.c`](cfnat_windows.c)
-- 基于 Winsock2 + Windows DNS API
-- 同样支持百度前置代理、ASN 运营商识别、运营商分池与多监听
-- 需要先执行 `WSAStartup`
-- 构建时通常需要 `-lws2_32 -lwinpthread -ldnsapi -static`
-
-### 当前实现取舍
-
-C 版当前三平台已经尽量向同一功能面收敛。当前重点包括：
-
-- 扫描
-- 机房识别
-- 延迟+丢包综合评分
-- 健康检查
-- 单端口转发
-- 百度前置代理
-- ASN 运营商识别
-- 运营商分池与多监听
-- 低内存运行
-
----
-
-## 构建方式
-
-- `cfnat_linux.c`：Linux 版本。使用 pthread、POSIX socket 和 `resolv`。
-- `cfnat_windows.c`：Windows 7+ 版本。使用 Winsock2、Windows DNS API 和 MinGW-w64 `winpthread`。
-- `cfnat_macos.c`：适用于 amd64 和 arm64 的 macOS 版本，链接时需要 `-lresolv`。
-- [`build.yml`](.github/workflows/build.yml)：用于 Linux、Windows 和 macOS 发布制品的 GitHub Actions 工作流。
-
-仓库放置位置：
-
-```text
-cfnat_linux.c
-cfnat_windows.c
-cfnat_macos.c
-.github/workflows/build.yml
-```
-
-Windows 构建说明：
-
-- 目标系统：通过 `_WIN32_WINNT=0x0601` 支持 Windows 7 或更高版本。
-- 编译器：MinGW-w64。
-- 链接库：`-lws2_32 -lwinpthread -ldnsapi -static`。
-
-macOS 构建说明：
-
-- amd64 最低目标：macOS 10.13。
-- arm64 最低目标：macOS 11.0，因为 Apple Silicon 从此版本开始支持。
-- macOS 不像 Linux 那样支持完全静态的 libc 二进制文件。
-
-### Linux
-
-```bash
-gcc -O2 -pthread -o cfnat-linux ./cfnat_linux.c -lresolv
-```
-
-### macOS
-
-```bash
-clang -O2 -pthread -o cfnat-macos ./cfnat_macos.c -lresolv
-```
-
-### Windows（MinGW-w64）
-
-```bash
-gcc -O2 -o cfnat.exe ./cfnat_windows.c -lws2_32 -lwinpthread -ldnsapi -static
-```
-
-仓库内现有文件：
-
-```text
-cfnat.go
-cfnat_linux.c
-cfnat_macos.c
-cfnat_windows.c
-README-build.md
-README.md
-```
+Go 版仍然适合快速开发、维护和功能扩展；C 版更适合资源受限和长期常驻。
 
 ---
 
 ## 常见问题
 
-### 1. 提示没有可用 IP
+### 1. 为什么只监听一个端口，却能同时处理 TLS 和非 TLS？
 
-可以按下面顺序排查：
+程序读取客户端连接的首字节：
 
-- 放宽 `-delay`
-- 更换 `-colo`
-- 提高 `-task`
-- 使用 `-random=false` 全量测试
-- 开启 `-log=debug` 观察失败阶段
-
-### 2. 为什么只监听一个端口却能同时处理 TLS 和非 TLS？
-
-因为程序只看客户端首字节：
-
-- `0x16` 认为是 TLS
-- 其他流量按非 TLS 处理
+```text
+0x16 → TLS
+其他 → 非 TLS / HTTP
+```
 
 然后分别转发到 `-port` 和 `-http-port`。
 
-### 3. C 版是不是功能一定比 Go 版强？
+### 2. `-select` 参数去哪了？
 
-不是。C 版的价值不是“功能更多”，而是“同类核心能力下更省内存”。
+当前三平台固定使用 `best` 策略，不再暴露 `-select` 参数。
 
-### 4. 为什么说 C 版更适合路由器？
+这样可以减少参数复杂度，也避免三平台行为不一致。
 
-因为这种设备最缺的通常不是 CPU，而是稳定可控的内存占用。
+### 3. 百度前置代理一定更快吗？
+
+不一定。
+
+它主要解决的是部分网络环境下直连 Cloudflare 不稳定的问题。是否更快取决于本机、前置节点、Cloudflare IP 三者之间的实际链路。
+
+### 4. 运营商分池什么时候有必要启用？
+
+当移动、电信、联通到 Cloudflare 或百度前置节点的路径差异明显时，分池更有意义。
+
+如果你的用户来源单一，或者不同运营商表现差异不大，可以不启用。
+
+### 5. C 版是不是功能一定比 Go 版强？
+
+不是。
+
+C 版的优势是低内存和更可控的运行时开销。Go 版在开发效率、可维护性和扩展速度上仍然更有优势。
+
+### 6. 为什么编译能过，但运行时提示找不到 IP 文件？
+
+C 源码运行时默认查找 `ips-v4.txt`、`ips-v6.txt` 和 `locations.json`。
+
+如果当前目录只有 `ips-v4`、`ips-v6`、`locations`，请手动复制为源码期望的文件名，或允许程序联网自动下载。
 
 ---
 
@@ -522,4 +684,4 @@ README.md
 
 本工具仅用于网络测试与学习用途。
 
-请在合法、合规的环境下使用。
+请在合法、合规的网络环境下使用。使用者需要自行承担因错误配置、滥用或违反当地法律法规造成的后果。
