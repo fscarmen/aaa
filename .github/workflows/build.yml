@@ -20,32 +20,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install ARM64 Cross Toolchain and Musl
+      - name: Download and Setup Aarch64 Musl Toolchain
         run: |
-          sudo apt-get update
-          # 👇 核心修复：
-          # 1. 移除了会导致 404 的 dpkg --add-architecture arm64 
-          # 2. 安装专为 amd64 环境打造的 arm64-cross musl 库，绝不报错
-          sudo apt-get install -y crossbuild-essential-arm64 musl-tools musl-dev-arm64-cross
-
-      - name: Build static ARM64 with musl
-        run: |
-          # 1. 动态查找系统中的 musl-gcc.specs 路径
-          SPECS_PATH=$(find /usr -name "musl-gcc.specs" 2>/dev/null | head -n 1)
+          # 1. 下载预编译好的、稳定的专用 aarch64-linux-musl 交叉编译工具链
+          # 该工具链天生自带完美的静态库与 specs 文件，无需通过 apt 零散安装
+          curl -L "https://musl.cc/aarch64-linux-musl-cross.tgz" -o musl-cross.tgz
+          tar -xzf musl-cross.tgz
           
-          # 2. 显式指定 aarch64-linux-gnu 的 musl 头文件与库文件搜索路径进行完美纯静态编译
-          # 3. 末尾补充 -lresolv 完美消除 cfnat_linux.c 里的高级 DNS 函数符号引用报错
-          if [ -z "$SPECS_PATH" ]; then
-            echo "未找到 specs 模板，使用原生交叉静态编译..."
-            aarch64-linux-gnu-gcc -static -pthread -O2 -Wall -Wextra cfnat_linux.c -o cfnat-linux-arm64 -lresolv
-          else
-            echo "找到 specs 文件路径: $SPECS_PATH"
-            aarch64-linux-gnu-gcc -specs="$SPECS_PATH" -static -pthread -O2 -Wall -Wextra \
-              -I/usr/aarch64-linux-gnu/include \
-              cfnat_linux.c \
-              -o cfnat-linux-arm64 \
-              -lresolv
-          fi
+          # 2. 将工具链的 bin 目录写入 GitHub Actions 环境的 PATH 中
+          echo "$(pwd)/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+
+      - name: Build static ARM64 with pure Musl-GCC
+        run: |
+          # 1. 直接调用专用的 musl-gcc，它本身就是闭环环境，不需要再通过 -specs 参数去找文件
+          # 2. 加上 -static、-pthread、-O2 等参数进行纯静态单文件编译
+          # 3. 末尾加上 -lresolv 完美补齐 cfnat_linux.c 内部的高级 DNS 函数符号
+          aarch64-linux-musl-gcc -static -pthread -O2 -Wall -Wextra \
+            cfnat_linux.c \
+            -o cfnat-linux-arm64 \
+            -lresolv
 
       - name: Check binary
         run: |
