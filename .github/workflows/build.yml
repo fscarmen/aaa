@@ -6,36 +6,42 @@ on:
       - "**/*.c"
       - ".github/workflows/build-linux-arm64.yml"
   workflow_dispatch:
+    inputs:
+      reason:
+        description: '手动触发编译的原因'
+        required: false
+        default: '手动构建最新 ARM64 静态版'
 
 jobs:
   build-linux-arm64:
     runs-on: ubuntu-latest
 
-  steps:
-    - uses: actions/checkout@v4 # 提示：目前稳定版推荐 v4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
 
-    - name: Install ARM64 musl compiler
-      run: |
-        sudo apt-get update
-        # 安装 crossbuild 基础环境以及 arm64 的 musl 工具链
-        sudo apt-get install -y crossbuild-essential-arm64 musl-tools
+      - name: Install ARM64 musl compiler
+        run: |
+          sudo apt-get update
+          # 安装 crossbuild 基础依赖以及专为静态编译设计的 musl 工具链
+          sudo apt-get install -y crossbuild-essential-arm64 musl-tools
 
-    - name: Build static ARM64 with musl
-      run: |
-        # 使用 aarch64-linux-gnu-musl-gcc (或者是通过 musl-gcc 包装)
-        # 注意末尾必须加上 -lresolv 补全 DNS 库符号
-        aarch64-linux-gnu-gcc -specs=/usr/share/musl/musl-gcc.specs -static -pthread -O2 -Wall -Wextra \
-          cfnat_linux.c \
-          -o cfnat-linux-arm64 \
-          -lresolv
+      - name: Build static ARM64 with musl
+        run: |
+          # 1. 使用 gcc 配合 musl 规格文件进行完美的跨平台纯静态编译
+          # 2. 末尾必须加上 -lresolv 以成功补全 cfnat_linux.c 里的高级 DNS 函数符号
+          aarch64-linux-gnu-gcc -specs=/usr/share/musl/musl-gcc.specs -static -pthread -O2 -Wall -Wextra \
+            cfnat_linux.c \
+            -o cfnat-linux-arm64 \
+            -lresolv
 
-    - name: Check binary
-      run: |
-        file cfnat-linux-arm64
-        ls -lh cfnat-linux-arm64
+      - name: Check binary
+        run: |
+          file cfnat-linux-arm64
+          ls -lh cfnat-linux-arm64
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: cfnat-linux-arm64
-        path: cfnat-linux-arm64
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfnat-linux-arm64
+          path: cfnat-linux-arm64
