@@ -805,11 +805,8 @@ static const char* select_summary(SelectStrategy strategy) {
 
 static void explain_selected_result(const Result*best) {
     if (!best)return;
-    if (g_cfg.log_level<LOG_INFO) return;
-    printf("选择策略: %s\n",select_summary(g_cfg.select_strategy));
-    if (g_cfg.log_level>=LOG_DEBUG) {
-        printf("结果解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，综合分 %d。\n",best->ip,best->latency_ms,best->loss_rate,score_result(best));
-    }
+    if (g_cfg.log_level<LOG_DEBUG) return;
+    printf("结果解释: 选择 %s，因为延迟 %d ms，丢包 %d%%，综合分 %d。\n",best->ip,best->latency_ms,best->loss_rate,score_result(best));
 }
 
 
@@ -1269,11 +1266,7 @@ int main(int argc,char**argv) {
         }
     }
     printf("候选池统计\n");
-    printf("当前策略: %s\n",g_cfg.select_name);
     printf("候选总数: %zu\n",results.len);
-    if (g_cfg.log_level>=LOG_INFO) {
-        printf("策略说明: %s\n",select_summary(g_cfg.select_strategy));
-    }
     printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
     for (size_t i=0;
     i<results.len;
@@ -1301,7 +1294,7 @@ int main(int argc,char**argv) {
         return 1;
     }
     g_listen_fd=lfd;
-    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，策略：%s，日志：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.select_name,g_cfg.log_name);
+    log_msg("正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，日志：%s",g_cfg.addr,g_cfg.port,g_cfg.http_port,g_cfg.num,g_cfg.delay_ms,g_cfg.log_name);
     pthread_t ht;
     create_small_thread(&ht,health_thread,NULL);
     while (atomic_load(&g_running)) {
