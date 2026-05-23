@@ -13,7 +13,6 @@ jobs:
   build-linux-glibc:
     name: Build ${{ matrix.name }} glibc dynamic
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -88,12 +87,6 @@ jobs:
             packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
             cc: s390x-linux-gnu-gcc
             cflags: ""
-          - name: linux-loongarch64
-            artifact: cfnat-linux-loongarch64
-            packages: gcc-loongarch64-linux-gnu libc6-dev-loong64-cross
-            cc: loongarch64-linux-gnu-gcc
-            cflags: ""
-            experimental: true
     env:
       SOURCE_FILE: cfnat_linux.c
     steps:
@@ -125,7 +118,6 @@ jobs:
   build-linux-musl:
     name: Build ${{ matrix.name }} musl static
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -141,61 +133,31 @@ jobs:
           - name: linux-armv5-musl
             artifact: cfnat-linux-armv5-musl
             zig_target: arm-linux-musleabi
-            cflags: "-march=armv5te"
+            cflags: "-mcpu=arm926ej_s"
           - name: linux-armv6-musl
             artifact: cfnat-linux-armv6-musl
             zig_target: arm-linux-musleabihf
-            cflags: "-march=armv6 -mfpu=vfp -mfloat-abi=hard"
+            cflags: "-mcpu=arm1176jzf_s"
           - name: linux-armv7-musl
             artifact: cfnat-linux-armv7-musl
             zig_target: arm-linux-musleabihf
-            cflags: "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard"
+            cflags: "-mcpu=cortex_a7"
           - name: linux-arm64-musl
             artifact: cfnat-linux-arm64-musl
             zig_target: aarch64-linux-musl
             cflags: ""
           - name: linux-mips-musl
             artifact: cfnat-linux-mips-musl
-            zig_target: mips-linux-musl
+            zig_target: mips-linux-musleabi
             cflags: ""
           - name: linux-mipsel-musl
             artifact: cfnat-linux-mipsel-musl
-            zig_target: mipsel-linux-musl
+            zig_target: mipsel-linux-musleabi
             cflags: ""
-          - name: linux-mips64-musl
-            artifact: cfnat-linux-mips64-musl
-            zig_target: mips64-linux-musl
-            cflags: ""
-            experimental: true
-          - name: linux-mips64el-musl
-            artifact: cfnat-linux-mips64el-musl
-            zig_target: mips64el-linux-musl
-            cflags: ""
-            experimental: true
-          - name: linux-ppc64-musl
-            artifact: cfnat-linux-ppc64-musl
-            zig_target: powerpc64-linux-musl
-            cflags: ""
-            experimental: true
-          - name: linux-ppc64le-musl
-            artifact: cfnat-linux-ppc64le-musl
-            zig_target: powerpc64le-linux-musl
-            cflags: ""
-            experimental: true
           - name: linux-riscv64-musl
             artifact: cfnat-linux-riscv64-musl
             zig_target: riscv64-linux-musl
             cflags: ""
-          - name: linux-s390x-musl
-            artifact: cfnat-linux-s390x-musl
-            zig_target: s390x-linux-musl
-            cflags: ""
-            experimental: true
-          - name: linux-loongarch64-musl
-            artifact: cfnat-linux-loongarch64-musl
-            zig_target: loongarch64-linux-musl
-            cflags: ""
-            experimental: true
     env:
       SOURCE_FILE: cfnat_linux.c
     steps:
