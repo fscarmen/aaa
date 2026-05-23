@@ -541,7 +541,9 @@ i686-w64-mingw32-gcc \
 
 当前工作流包含：
 
-- Linux glibc 动态版：amd64、386、armv5、armv6、armv7、arm64、mips、mipsel、mips64、mips64el、ppc64、ppc64le、riscv64、s390x。Linux musl 静态版：amd64、386、armv5、armv6、armv7、arm64、mips、mipsel、mips64、mips64el、ppc64、ppc64le、riscv64、s390x、loongarch64。
+- Linux glibc 动态版：amd64、386、armv5、armv6、armv7、arm64、mips、mipsel、mips64、mips64el、ppc64、ppc64le、riscv64、s390x。
+- Linux musl 静态版：amd64、386、armv6、armv7、arm64、mips、mipsel、riscv64。
+- armv5、mips64、mips64el、ppc64、ppc64le、s390x 当前使用 glibc 动态版发布；Zig 0.15.1 在 armv5 musl 下会因 32 位原子内建符号缺失导致链接失败，在 mips64 / ppc64 / s390x 等架构下也不能稳定提供 musl libc，因此不放入必跑 musl 矩阵，避免 release 出现红叉。
 - Windows：amd64、386。
 - macOS：amd64、arm64。
 - tag 触发发布：推送 `v*` 标签后打包 release 文件和校验和。
