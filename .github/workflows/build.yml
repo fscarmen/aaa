@@ -314,9 +314,9 @@ jobs:
             esac
           done
           cp cfnat_linux.c cfnat_macos.c cfnat_windows.c README.md package/
-          if [ -f ips-v4 ]; then cp ips-v4 package/; cp ips-v4 package/ips-v4.txt; fi
-          if [ -f ips-v6 ]; then cp ips-v6 package/; cp ips-v6 package/ips-v6.txt; fi
-          if [ -f locations ]; then cp locations package/; cp locations package/locations.json; fi
+          if [ -f ips-v4.txt ]; then cp ips-v4.txt package/; fi
+          if [ -f ips-v6.txt ]; then cp ips-v6.txt package/; fi
+          if [ -f locations.json ]; then cp locations.json package/; fi
           (cd package && zip -r ../release/cfnat-release.zip .)
           ls -lh package
           ls -lh release
