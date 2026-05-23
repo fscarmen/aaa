@@ -17,7 +17,7 @@ C 版基于 [`cfnat.go`](cfnat.go) 移植，目标不是把功能做得更复杂
 - [百度前置代理与运营商分池](#百度前置代理与运营商分池)
 - [构建与发布](#构建与发布)
 - [仓库文件说明](#仓库文件说明)
-- [内置数据说明](#内置数据说明)
+- [数据文件说明](#数据文件说明)
 - [日志与排错](#日志与排错)
 - [资源占用说明](#资源占用说明)
 - [常见问题](#常见问题)
@@ -64,7 +64,6 @@ Cloudflare 优选 IP:443 或 :80
 - 支持 IPv4 / IPv6 扫描入口。
 - 支持 IPv4 / IPv6 监听地址。
 - 支持按 Cloudflare 数据中心过滤，例如 `HKG`、`SJC`、`LAX`。
-- 候选 IP 按延迟和丢包率综合评分。
 - 候选 IP 按延迟和丢包率综合评分，始终使用当前 score 最低的最优 IP。
 - 单端口同时承接 TLS 与非 TLS / HTTP 流量。
 - 根据客户端首字节自动分流到 `-port` 或 `-http-port`。
@@ -73,7 +72,7 @@ Cloudflare 优选 IP:443 或 :80
 - 支持运营商分池监听，可按移动、电信、联通分别建立监听入口。
 - Linux / macOS / Windows 三平台实现。
 - Linux / macOS 使用 `pthread` + POSIX/BSD socket，并内置轻量 DNS TXT 查询，避免依赖 glibc resolver 静态链接。
-- Windows 使用 Winsock2 + Windows DNS API + MinGW-w64 `winpthread`，启动时自动切换 UTF-8 控制台编码。
+- Windows 使用 Winsock2 + Windows DNS API + MinGW-w64 `winpthread`，控制台输出通过 `WriteConsoleW` 直接写入 Unicode，兼容 Windows 7 中文显示。
 - 统一日志级别：`silent`、`error`、`warn`、`info`、`debug`。
 
 ---
@@ -112,6 +111,7 @@ Windows（MinGW-w64）：
 ```bash
 x86_64-w64-mingw32-gcc \
   -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat.exe \
   -lws2_32 -ldnsapi -lwinpthread -static -s
@@ -264,7 +264,7 @@ cfnat_windows.c
 -ips=6 → IPv6
 ```
 
-扫描数据和位置数据已经内置在程序中，启动时不会读取本地文件，也不会联网下载。
+本地数据文件不存在时，会尝试自动下载。
 
 ### 2. 生成待测 IP
 
@@ -293,7 +293,7 @@ xxxx-SJC
 xxxx-LAX
 ```
 
-后缀就是 Cloudflare 数据中心代码。程序会结合内置位置表映射地区与城市信息。
+后缀就是 Cloudflare 数据中心代码。程序会结合 `locations.json` 映射地区与城市信息。
 
 ### 5. 按 `-colo` 过滤
 
@@ -492,15 +492,17 @@ clang -O2 -pipe -std=c11 \
 
 ### Windows 中文显示
 
-Windows 版程序启动时会自动切换控制台输入/输出为 UTF-8，并设置 UTF-8 locale，用于避免中文日志乱码。
+Windows 7 的传统 CMD 对 UTF-8 控制台支持不稳定，单纯调用 `SetConsoleOutputCP(CP_UTF8)` 或执行 `chcp 65001` 仍可能乱码。
 
-如果仍然出现乱码，建议使用 Windows Terminal 或 PowerShell。传统 CMD 可手动执行：
+Windows 版现在不再依赖控制台代码页显示中文。程序会把内部 UTF-8 日志转换为 Unicode，并通过 `WriteConsoleW` 直接写入控制台。
 
-```cmd
-chcp 65001
-```
+这样在 Windows 7 / Windows 10 / Windows 11 下都更稳定：
 
-推荐字体：Consolas、Cascadia Mono、Lucida Console。
+- 直接在 CMD 运行时，中文走 Unicode 控制台输出。
+- 输出重定向到文件时，仍保留 UTF-8 文本。
+- 不需要用户手动执行 `chcp 65001`。
+
+如果 Windows 7 下仍显示方块，通常是控制台字体缺少中文字形，建议把 CMD 字体改成支持中文的字体，或使用 PowerShell。
 
 ### Windows 构建
 
@@ -509,6 +511,7 @@ chcp 65001
 ```bash
 x86_64-w64-mingw32-gcc \
   -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat-windows-amd64.exe \
   -lws2_32 -ldnsapi -lwinpthread -static -s
@@ -519,6 +522,7 @@ x86_64-w64-mingw32-gcc \
 ```bash
 i686-w64-mingw32-gcc \
   -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
+  -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat-windows-386.exe \
   -lws2_32 -ldnsapi -lwinpthread -static -s
@@ -527,6 +531,7 @@ i686-w64-mingw32-gcc \
 说明：
 
 - `_WIN32_WINNT=0x0601` 表示目标为 Windows 7 或更高版本。
+- `-finput-charset=UTF-8 -fexec-charset=UTF-8` 确保源码中的中文字符串按 UTF-8 编译，配合 `WriteConsoleW` 避免 Windows 7 控制台乱码。
 - Windows 网络层使用 Winsock2，因此需要 `-lws2_32`。
 - Windows TXT 查询使用 `DnsQuery_A()` / `DnsFree()`，因此需要 `-ldnsapi`。
 - Windows 线程兼容层使用 MinGW-w64 `winpthread`，因此需要 `-lwinpthread`。
@@ -549,7 +554,7 @@ i686-w64-mingw32-gcc \
 - tag 触发发布：推送 `v*` 标签后打包 release 文件和校验和。
 - 手动触发：支持 `workflow_dispatch`。
 
-发布包会把二进制文件放入 `bin/`，并附带源码和 README。基础扫描数据已经内置在源码中。
+发布包会把二进制文件放入 `bin/`，并附带源码、README 和基础数据文件。
 
 ### 常见构建失败
 
@@ -572,6 +577,9 @@ cfnat-origin.go                  原始 Go 版留档
 cfnat_linux.c                    Linux C 版入口
 cfnat_macos.c                    macOS C 版入口
 cfnat_windows.c                  Windows C 版入口
+ips-v4                           上游 IPv4 数据文件
+ips-v6                           上游 IPv6 数据文件
+locations                        上游 Cloudflare 数据中心位置文件
 README.md                        主说明文档
 .github/workflows/build.yml      C 版多平台构建工作流
 .github/workflows/build_go.yml   Go 版构建工作流
@@ -581,20 +589,35 @@ README.md                        主说明文档
 
 ---
 
-## 内置数据说明
+## 数据文件说明
 
-程序已内置 Cloudflare IPv4 段、IPv6 段和数据中心位置表。
+源码运行时会查找以下本地文件：
 
-运行时不会读取当前目录下的 `ips-v4.txt`、`ips-v6.txt`、`locations.json`，也不会自动联网下载这些数据文件。
+```text
+ips-v4.txt
+ips-v6.txt
+locations.json
+```
 
-这样做的好处是：
+如果文件不存在，程序会自动从上游地址下载并保存为上述文件名。
 
-- 开箱即用，不依赖外部数据文件。
-- 离线环境也可以直接启动扫描。
-- 不依赖 `curl` / `wget`。
-- 避免 GitHub、jsDelivr 或 raw 地址不可访问导致启动失败。
+仓库中也可能保留上游原始数据文件：
 
-需要更新内置数据时，需要用新的数据重新生成源码并重新编译。
+```text
+ips-v4
+ips-v6
+locations
+```
+
+离线运行时可以手动复制：
+
+```bash
+cp ips-v4 ips-v4.txt
+cp ips-v6 ips-v6.txt
+cp locations locations.json
+```
+
+这样可以避免启动时依赖网络下载基础数据。
 
 ---
 
@@ -705,11 +728,11 @@ Go 版仍然适合快速开发、维护和功能扩展；C 版更适合资源受
 
 C 版的优势是低内存和更可控的运行时开销。Go 版在开发效率、可维护性和扩展速度上仍然更有优势。
 
-### 6. 还需要把 IP 文件和 locations 文件放到程序目录吗？
+### 6. 为什么编译能过，但运行时提示找不到 IP 文件？
 
-不需要。
+C 源码运行时默认查找 `ips-v4.txt`、`ips-v6.txt` 和 `locations.json`。
 
-当前版本已经把 Cloudflare IPv4 段、IPv6 段和数据中心位置表内置到源码中。程序运行时不会读取 `ips-v4.txt`、`ips-v6.txt`、`locations.json`，也不会联网下载这些文件。
+如果当前目录只有 `ips-v4`、`ips-v6`、`locations`，请手动复制为源码期望的文件名，或允许程序联网自动下载。
 
 ---
 
