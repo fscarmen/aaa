@@ -100,6 +100,12 @@ typedef struct {
     char **ips;
     size_t total;
     atomic_size_t index;
+    atomic_size_t completed;
+    atomic_size_t connect_fail;
+    atomic_size_t header_fail;
+    atomic_size_t cfray_miss;
+    atomic_size_t colo_skip;
+    long scan_start_ms;
     ResultList *results;
     Config *cfg;
     BaiduProxyPool *proxy_pool;
@@ -462,7 +468,10 @@ static StringList load_ip_list(const char *filename, int random_mode) {
     StringList out = {0};
     FILE *f = fopen(filename, "r");
     if (!f) return out;
+    log_msg("正在读取 %s，模式：%s", filename, random_mode ? "CIDR随机抽样" : "完整展开CIDR");
     char line[MAX_LINE];
+    long start_ms = now_ms();
+    size_t cidr_count = 0;
     srand((unsigned)time(NULL));
     while (fgets(line, sizeof(line), f)) {
         trim_line(line);
@@ -472,6 +481,7 @@ static StringList load_ip_list(const char *filename, int random_mode) {
             strlist_add(&out, line);
             continue;
         }
+        cidr_count++;
         *slash = 0;
         int prefix = atoi(slash + 1);
         uint32_t base = ipv4_to_u32(line);
@@ -491,8 +501,15 @@ static StringList load_ip_list(const char *filename, int random_mode) {
                 strlist_add(&out, ip);
             }
         }
+        if (!random_mode && out.len > 0 && out.len % 50000 == 0) {
+            log_msg("IP 列表展开进度: %zu 个", out.len);
+        }
     }
     fclose(f);
+    log_msg("IP 列表加载完成: %zu 个候选，CIDR 行数: %zu，耗时 %ld 秒", out.len, cidr_count, (now_ms() - start_ms) / 1000);
+    if (!random_mode && out.len > 100000) {
+        warn_msg("当前使用 -random=false，已完整展开大量 IP，扫描会明显变慢；需要快速启动时建议使用 -random=true");
+    }
     return out;
 }
 
@@ -1201,7 +1218,6 @@ static void resultlist_add(ResultList *rl, const Result *r) {
 
 static void *scan_worker(void *arg) {
     ScanCtx *ctx = (ScanCtx *)arg;
-    const char *req = "GET / HTTP/1.1\r\nHost: cloudflaremirrors.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n";
     while (atomic_load(&g_running)) {
         size_t idx = atomic_fetch_add(&ctx->index, 1);
         if (idx >= ctx->total || !atomic_load(&g_running)) break;
@@ -1210,25 +1226,72 @@ static void *scan_worker(void *arg) {
         int success_count = 0;
         int best_latency = 0;
         char best_colo[MAX_COLO_LEN] = {0};
+        int connected_once = 0;
+        int header_once = 0;
+        int cfray_missing_once = 0;
+
         for (int attempt = 0; atomic_load(&g_running) && attempt < probes; attempt++) {
             int latency = 0;
             int fd = dial_target_with_proxy(ip, 80, ctx->cfg->delay_ms, ctx->proxy_pool, &latency);
-            if (fd < 0) continue;
+            if (fd < 0) {
+                atomic_fetch_add(&ctx->connect_fail, 1);
+                continue;
+            }
+            connected_once = 1;
+
+            char req[512];
+            if ((attempt % 2) == 0) {
+                snprintf(req, sizeof(req),
+                         "GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n",
+                         ip);
+            } else {
+                snprintf(req, sizeof(req),
+                         "GET / HTTP/1.1\r\nHost: cloudflaremirrors.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n");
+            }
+
             send(fd, req, strlen(req), 0);
             char hdr[4096];
-            int n = recv_headers(fd, hdr, sizeof(hdr), 2000);
+            int n = recv_headers(fd, hdr, sizeof(hdr), ctx->cfg->delay_ms > 2000 ? ctx->cfg->delay_ms : 2000);
             close(fd);
-            if (n <= 0) continue;
+            if (n <= 0) {
+                atomic_fetch_add(&ctx->header_fail, 1);
+                continue;
+            }
+            header_once = 1;
+
             char colo[MAX_COLO_LEN] = {0};
-            if (extract_cfray(hdr, colo, sizeof(colo)) != 0) continue;
-            if (!colo_allowed(colo)) continue;
+            if (extract_cfray(hdr, colo, sizeof(colo)) != 0) {
+                cfray_missing_once = 1;
+                atomic_fetch_add(&ctx->cfray_miss, 1);
+                continue;
+            }
+            if (!colo_allowed(colo)) {
+                atomic_fetch_add(&ctx->colo_skip, 1);
+                continue;
+            }
             success_count++;
             if (best_latency == 0 || latency < best_latency) {
                 best_latency = latency;
                 snprintf(best_colo, sizeof(best_colo), "%s", colo);
             }
         }
+
+        if (success_count <= 0 && connected_once && header_once && cfray_missing_once && !ctx->cfg->colo[0]) {
+            success_count = 1;
+            if (best_latency == 0) best_latency = ctx->cfg->delay_ms > 0 ? ctx->cfg->delay_ms : 1;
+            snprintf(best_colo, sizeof(best_colo), "%s", "UNK");
+        }
+
+        size_t done = atomic_fetch_add(&ctx->completed, 1) + 1;
+        if (done == ctx->total || done % 5000 == 0) {
+            size_t found = 0;
+            pthread_mutex_lock(&ctx->results->mu);
+            found = ctx->results->len;
+            pthread_mutex_unlock(&ctx->results->mu);
+            log_msg("扫描进度: %zu/%zu，已发现有效 IP: %zu，耗时 %ld 秒", done, ctx->total, found, (now_ms() - ctx->scan_start_ms) / 1000);
+        }
         if (success_count <= 0 || !best_colo[0] || best_latency <= 0) continue;
+
         Result r;
         memset(&r, 0, sizeof(r));
         snprintf(r.ip, sizeof(r.ip), "%s", ip);
@@ -1241,6 +1304,10 @@ static void *scan_worker(void *arg) {
         if (loc) {
             snprintf(r.region, sizeof(r.region), "%s", loc->region);
             snprintf(r.city, sizeof(r.city), "%s", loc->city);
+        }
+        if (!loc && !strcmp(best_colo, "UNK")) {
+            snprintf(r.region, sizeof(r.region), "%s", "Unknown");
+            snprintf(r.city, sizeof(r.city), "%s", "Unknown");
         }
         debug_msg("发现有效IP %s 位置信息 %s 延迟 %d 毫秒 丢包 %d%% (%d/%d)", r.ip, r.city[0] ? r.city : "未知", r.latency_ms, r.loss_rate, r.success_count, r.probe_count);
         resultlist_add(ctx->results, &r);
@@ -1287,9 +1354,16 @@ static ResultList scan_ips(StringList *ips, Config *cfg, BaiduProxyPool *proxy_p
         .total = ips->len,
         .results = &rl,
         .cfg = cfg,
-        .proxy_pool = proxy_pool
+        .proxy_pool = proxy_pool,
+        .scan_start_ms = now_ms()
     };
     atomic_init(&ctx.index, 0);
+    atomic_init(&ctx.completed, 0);
+    atomic_init(&ctx.connect_fail, 0);
+    atomic_init(&ctx.header_fail, 0);
+    atomic_init(&ctx.cfray_miss, 0);
+    atomic_init(&ctx.colo_skip, 0);
+    log_msg("开始扫描候选 IP: %zu 个，线程: %d，单 IP 探测次数: %d，超时: %d ms", ips->len, threads, cfg->num > 0 ? cfg->num : 1, cfg->delay_ms);
     int created = 0;
     for (int i = 0; i < threads; i++) {
         if (pthread_create(&tids[i], NULL, scan_worker, &ctx) != 0) break;
@@ -1300,6 +1374,17 @@ static ResultList scan_ips(StringList *ips, Config *cfg, BaiduProxyPool *proxy_p
     pthread_mutex_destroy(&rl.mu);
     qsort(rl.items, rl.len, sizeof(Result), cmp_result);
     if (rl.len > (size_t)cfg->ipnum) rl.len = (size_t)cfg->ipnum;
+    log_msg("扫描完成: 有效候选 %zu 个，耗时 %ld 秒", rl.len, (now_ms() - ctx.scan_start_ms) / 1000);
+    if (rl.len == 0 || cfg->log_level >= LOG_DEBUG) {
+        log_msg("扫描统计: 连接失败 %zu，读取响应失败 %zu，缺少 CF-RAY %zu，数据中心过滤 %zu",
+                atomic_load(&ctx.connect_fail),
+                atomic_load(&ctx.header_fail),
+                atomic_load(&ctx.cfray_miss),
+                atomic_load(&ctx.colo_skip));
+        if (rl.len == 0 && atomic_load(&ctx.cfray_miss) > 0 && cfg->colo[0]) {
+            warn_msg("已连接到部分 IP，但响应中没有 CF-RAY 或不匹配 -colo；可先去掉 -colo 验证网络链路");
+        }
+    }
     return rl;
 }
 
