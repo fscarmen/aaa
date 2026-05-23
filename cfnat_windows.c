@@ -610,18 +610,10 @@ static int download_file_from_urls(const char **urls, const char *filename) {
     return -1;
 }
 
-static int ensure_data_file(const char *expected, const char *bundled, const char **urls) {
+static int ensure_data_file(const char *expected, const char **urls) {
     if (file_exists(expected)) return 0;
 
-    if (bundled && file_exists(bundled)) {
-        if (copy_file(bundled, expected) == 0) {
-            log_msg("已从本地 %s 复制为 %s", bundled, expected);
-            return 0;
-        }
-    }
-
-    printf("文件 %s 不存在，正在下载数据
-", expected);
+    printf("文件 %s 不存在，正在下载数据\n", expected);
     return download_file_from_urls(urls, expected);
 }
 
@@ -745,7 +737,7 @@ static char *json_string_value(char *p, const char *key, char *out, size_t outsz
 }
 
 static void load_locations(void) {
-    if (ensure_data_file("locations.json", "locations", LOC_URLS) != 0) {
+    if (ensure_data_file("locations.json", LOC_URLS) != 0) {
         log_msg("下载 locations.json 失败");
         return;
     }
@@ -1934,9 +1926,8 @@ int main(int argc, char **argv) {
     parse_args(&g_cfg, argc, argv);
     install_signals();
     const char *ipfile = g_cfg.ips_type == 6 ? "ips-v6.txt" : "ips-v4.txt";
-    const char *bundled_ipfile = g_cfg.ips_type == 6 ? "ips-v6" : "ips-v4";
     const char **urls = g_cfg.ips_type == 6 ? IPS_V6_URLS : IPS_V4_URLS;
-    if (ensure_data_file(ipfile, bundled_ipfile, urls) != 0) {
+    if (ensure_data_file(ipfile, urls) != 0) {
         log_msg("下载 %s 失败", ipfile);
         return 1;
     }

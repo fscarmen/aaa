@@ -550,14 +550,6 @@ ips-v6.txt
 locations.json
 ```
 
-如果 release 包里只有无扩展名的数据文件，也会自动复制：
-
-```text
-ips-v4       -> ips-v4.txt
-ips-v6       -> ips-v6.txt
-locations    -> locations.json
-```
-
 Win7 如果系统 TLS 组件过旧，HTTPS 下载仍可能失败。这种情况下把上述三个数据文件放到 exe 同目录即可离线运行。
 
 ### GitHub Actions
@@ -601,9 +593,9 @@ cfnat-origin.go                  原始 Go 版留档
 cfnat_linux.c                    Linux C 版入口
 cfnat_macos.c                    macOS C 版入口
 cfnat_windows.c                  Windows C 版入口
-ips-v4                           上游 IPv4 数据文件
-ips-v6                           上游 IPv6 数据文件
-locations                        上游 Cloudflare 数据中心位置文件
+ips-v4.txt                       IPv4 数据文件
+ips-v6.txt                       IPv6 数据文件
+locations.json                   Cloudflare 数据中心位置文件
 README.md                        主说明文档
 .github/workflows/build.yml      C 版多平台构建工作流
 .github/workflows/build_go.yml   Go 版构建工作流
@@ -625,23 +617,15 @@ locations.json
 
 如果文件不存在，程序会自动从上游地址下载并保存为上述文件名。
 
-仓库中也可能保留上游原始数据文件：
+离线运行时请直接把下面三个文件放在程序同目录：
 
 ```text
-ips-v4
-ips-v6
-locations
+ips-v4.txt
+ips-v6.txt
+locations.json
 ```
 
-离线运行时可以手动复制：
-
-```bash
-cp ips-v4 ips-v4.txt
-cp ips-v6 ips-v6.txt
-cp locations locations.json
-```
-
-这样可以避免启动时依赖网络下载基础数据。
+Linux、macOS、Windows 三个平台统一使用这三个带扩展名的数据文件，避免 Windows 用户看不到文件类型或手动复制时混淆。
 
 ---
 
@@ -756,7 +740,7 @@ C 版的优势是低内存和更可控的运行时开销。Go 版在开发效率
 
 C 源码运行时默认查找 `ips-v4.txt`、`ips-v6.txt` 和 `locations.json`。
 
-如果当前目录只有 `ips-v4`、`ips-v6`、`locations`，请手动复制为源码期望的文件名，或允许程序联网自动下载。
+请确认程序同目录下存在 `ips-v4.txt`、`ips-v6.txt`、`locations.json`，或允许程序联网自动下载。
 
 ---
 
