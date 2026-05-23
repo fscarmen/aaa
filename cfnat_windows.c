@@ -200,6 +200,8 @@ static BaiduProxyPool g_default_proxy_pool = {0};
 
 static CarrierRuntime *g_carrier_runtimes = NULL;
 static size_t g_carrier_runtime_count = 0;
+static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
+
 
 static int parse_addr(const char *addr, char *host, size_t hostsz, int *port);
 static socket_t accept_interruptible(socket_t listen_fd, struct sockaddr *addr, int *addrlen);
@@ -360,9 +362,12 @@ static void vlog_line(const char *tag, const char *fmt, va_list ap) {
     localtime_s(&tmv, &t);
     char ts[32];
     strftime(ts, sizeof(ts), "%Y/%m/%d %H:%M:%S", &tmv);
+    pthread_mutex_lock(&g_log_mu);
     fprintf(stderr, "%s [%s] ", ts, tag);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
+    fflush(stderr);
+    pthread_mutex_unlock(&g_log_mu);
 }
 
 static void log_msg(const char *fmt, ...) {
@@ -1318,7 +1323,6 @@ static void *scan_worker(void *arg) {
         int success_count = 0;
         int best_latency = 0;
         char best_colo[MAX_COLO_LEN] = {0};
-        int connected_once = 0;
         int header_once = 0;
         int cfray_missing_once = 0;
 
@@ -1329,8 +1333,6 @@ static void *scan_worker(void *arg) {
                 atomic_fetch_add(&ctx->connect_fail, 1);
                 continue;
             }
-            connected_once = 1;
-
             char req[512];
             if ((attempt % 2) == 0) {
                 snprintf(req, sizeof(req),
@@ -1368,15 +1370,11 @@ static void *scan_worker(void *arg) {
             }
         }
 
-        if (success_count <= 0 && connected_once && !ctx->cfg->colo[0]) {
+        if (success_count <= 0 && header_once && cfray_missing_once && !ctx->cfg->colo[0] && (!ctx->proxy_pool || ctx->proxy_pool->len == 0)) {
             success_count = 1;
             if (best_latency == 0) best_latency = ctx->cfg->delay_ms > 0 ? ctx->cfg->delay_ms : 1;
             snprintf(best_colo, sizeof(best_colo), "%s", "UNK");
-            if (!header_once) {
-                debug_msg("%s TCP 连接成功但未读到 HTTP 响应，作为 UNK 候选交给健康检查确认", ip);
-            } else if (cfray_missing_once) {
-                debug_msg("%s HTTP 响应缺少 CF-RAY，作为 UNK 候选交给健康检查确认", ip);
-            }
+            debug_msg("%s HTTP 响应缺少 CF-RAY，作为 UNK 候选交给健康检查确认", ip);
         }
 
         size_t done = atomic_fetch_add(&ctx->completed, 1) + 1;
