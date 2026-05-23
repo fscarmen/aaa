@@ -837,9 +837,12 @@ static int tcp_connect(const char *ip, int port, int timeout_ms, int *latency_ms
         }
         rc = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
     }
-    if (rc < 0 && errno != EINPROGRESS) {
-        close(fd);
-        return -1;
+    if (rc == SOCKET_ERROR) {
+        int werr = WSAGetLastError();
+        if (werr != WSAEWOULDBLOCK && werr != WSAEINPROGRESS && werr != WSAEALREADY) {
+            close(fd);
+            return -1;
+        }
     }
     fd_set wfds;
     FD_ZERO(&wfds);
@@ -855,7 +858,7 @@ static int tcp_connect(const char *ip, int port, int timeout_ms, int *latency_ms
     }
     int err = 0;
     int len = (int)sizeof(err);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err != 0) {
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&err, &len) < 0 || err != 0) {
         close(fd);
         return -1;
     }
@@ -1365,10 +1368,15 @@ static void *scan_worker(void *arg) {
             }
         }
 
-        if (success_count <= 0 && connected_once && header_once && cfray_missing_once && !ctx->cfg->colo[0]) {
+        if (success_count <= 0 && connected_once && !ctx->cfg->colo[0]) {
             success_count = 1;
             if (best_latency == 0) best_latency = ctx->cfg->delay_ms > 0 ? ctx->cfg->delay_ms : 1;
             snprintf(best_colo, sizeof(best_colo), "%s", "UNK");
+            if (!header_once) {
+                debug_msg("%s TCP 连接成功但未读到 HTTP 响应，作为 UNK 候选交给健康检查确认", ip);
+            } else if (cfray_missing_once) {
+                debug_msg("%s HTTP 响应缺少 CF-RAY，作为 UNK 候选交给健康检查确认", ip);
+            }
         }
 
         size_t done = atomic_fetch_add(&ctx->completed, 1) + 1;
