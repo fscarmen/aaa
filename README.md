@@ -17,7 +17,7 @@ C 版基于 [`cfnat.go`](cfnat.go) 移植，目标不是把功能做得更复杂
 - [百度前置代理与运营商分池](#百度前置代理与运营商分池)
 - [构建与发布](#构建与发布)
 - [仓库文件说明](#仓库文件说明)
-- [数据文件说明](#数据文件说明)
+- [内置数据说明](#内置数据说明)
 - [日志与排错](#日志与排错)
 - [资源占用说明](#资源占用说明)
 - [常见问题](#常见问题)
@@ -264,7 +264,7 @@ cfnat_windows.c
 -ips=6 → IPv6
 ```
 
-本地数据文件不存在时，会尝试自动下载。
+扫描数据和位置数据已经内置在程序中，启动时不会读取本地文件，也不会联网下载。
 
 ### 2. 生成待测 IP
 
@@ -293,7 +293,7 @@ xxxx-SJC
 xxxx-LAX
 ```
 
-后缀就是 Cloudflare 数据中心代码。程序会结合 `locations.json` 映射地区与城市信息。
+后缀就是 Cloudflare 数据中心代码。程序会结合内置位置表映射地区与城市信息。
 
 ### 5. 按 `-colo` 过滤
 
@@ -549,7 +549,7 @@ i686-w64-mingw32-gcc \
 - tag 触发发布：推送 `v*` 标签后打包 release 文件和校验和。
 - 手动触发：支持 `workflow_dispatch`。
 
-发布包会把二进制文件放入 `bin/`，并附带源码、README 和基础数据文件。
+发布包会把二进制文件放入 `bin/`，并附带源码和 README。基础扫描数据已经内置在源码中。
 
 ### 常见构建失败
 
@@ -572,9 +572,6 @@ cfnat-origin.go                  原始 Go 版留档
 cfnat_linux.c                    Linux C 版入口
 cfnat_macos.c                    macOS C 版入口
 cfnat_windows.c                  Windows C 版入口
-ips-v4                           上游 IPv4 数据文件
-ips-v6                           上游 IPv6 数据文件
-locations                        上游 Cloudflare 数据中心位置文件
 README.md                        主说明文档
 .github/workflows/build.yml      C 版多平台构建工作流
 .github/workflows/build_go.yml   Go 版构建工作流
@@ -584,35 +581,20 @@ README.md                        主说明文档
 
 ---
 
-## 数据文件说明
+## 内置数据说明
 
-源码运行时会查找以下本地文件：
+程序已内置 Cloudflare IPv4 段、IPv6 段和数据中心位置表。
 
-```text
-ips-v4.txt
-ips-v6.txt
-locations.json
-```
+运行时不会读取当前目录下的 `ips-v4.txt`、`ips-v6.txt`、`locations.json`，也不会自动联网下载这些数据文件。
 
-如果文件不存在，程序会自动从上游地址下载并保存为上述文件名。
+这样做的好处是：
 
-仓库中也可能保留上游原始数据文件：
+- 开箱即用，不依赖外部数据文件。
+- 离线环境也可以直接启动扫描。
+- 不依赖 `curl` / `wget`。
+- 避免 GitHub、jsDelivr 或 raw 地址不可访问导致启动失败。
 
-```text
-ips-v4
-ips-v6
-locations
-```
-
-离线运行时可以手动复制：
-
-```bash
-cp ips-v4 ips-v4.txt
-cp ips-v6 ips-v6.txt
-cp locations locations.json
-```
-
-这样可以避免启动时依赖网络下载基础数据。
+需要更新内置数据时，需要用新的数据重新生成源码并重新编译。
 
 ---
 
@@ -723,11 +705,11 @@ Go 版仍然适合快速开发、维护和功能扩展；C 版更适合资源受
 
 C 版的优势是低内存和更可控的运行时开销。Go 版在开发效率、可维护性和扩展速度上仍然更有优势。
 
-### 6. 为什么编译能过，但运行时提示找不到 IP 文件？
+### 6. 还需要把 IP 文件和 locations 文件放到程序目录吗？
 
-C 源码运行时默认查找 `ips-v4.txt`、`ips-v6.txt` 和 `locations.json`。
+不需要。
 
-如果当前目录只有 `ips-v4`、`ips-v6`、`locations`，请手动复制为源码期望的文件名，或允许程序联网自动下载。
+当前版本已经把 Cloudflare IPv4 段、IPv6 段和数据中心位置表内置到源码中。程序运行时不会读取 `ips-v4.txt`、`ips-v6.txt`、`locations.json`，也不会联网下载这些文件。
 
 ---
 
