@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         include:
           - name: linux-amd64
@@ -91,6 +92,9 @@ jobs:
       SOURCE_FILE: cfnat_linux.c
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
       - name: Install cross compiler
         shell: bash
         run: |
@@ -120,6 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
         include:
           - name: linux-amd64-musl
@@ -130,10 +135,6 @@ jobs:
             artifact: cfnat-linux-386-musl
             zig_target: x86-linux-musl
             cflags: ""
-          - name: linux-armv5-musl
-            artifact: cfnat-linux-armv5-musl
-            zig_target: arm-linux-musleabi
-            cflags: "-mcpu=arm926ej_s"
           - name: linux-armv6-musl
             artifact: cfnat-linux-armv6-musl
             zig_target: arm-linux-musleabihf
@@ -162,6 +163,9 @@ jobs:
       SOURCE_FILE: cfnat_linux.c
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -209,6 +213,9 @@ jobs:
       SOURCE_FILE: cfnat_windows.c
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
       - name: Install MinGW-w64
         shell: bash
         run: |
@@ -252,6 +259,9 @@ jobs:
       SOURCE_FILE: cfnat_macos.c
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
       - name: Build macOS
         shell: bash
         run: |
@@ -281,6 +291,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ github.token }}
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
