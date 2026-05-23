@@ -5,7 +5,6 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
-#include <resolv.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -714,27 +713,161 @@ static void append_unique_addr(StringList *list, const char *value) {
     strlist_add(list, value);
 }
 
-static int lookup_txt_first(const char *name, char *out, size_t outsz) {
-    unsigned char answer[4096];
-    int len = res_query(name, ns_c_in, ns_t_txt, answer, sizeof(answer));
-    if (len < 0) return -1;
-    ns_msg handle;
-    if (ns_initparse(answer, len, &handle) < 0) return -1;
-    int count = ns_msg_count(handle, ns_s_an);
-    for (int i = 0; i < count; i++) {
-        ns_rr rr;
-        if (ns_parserr(&handle, ns_s_an, i, &rr) < 0) continue;
-        const unsigned char *rdata = ns_rr_rdata(rr);
-        if (!rdata || ns_rr_rdlen(rr) <= 1) continue;
-        int txtlen = rdata[0];
-        if (txtlen <= 0) continue;
-        if ((size_t)txtlen >= outsz) txtlen = (int)outsz - 1;
-        memcpy(out, rdata + 1, (size_t)txtlen);
-        out[txtlen] = '\0';
+static int read_first_nameserver(char *out, size_t outsz) {
+    FILE *f = fopen("/etc/resolv.conf", "r");
+    if (!f) {
+        snprintf(out, outsz, "1.1.1.1");
         return 0;
+    }
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        trim_line(line);
+        if (strncmp(line, "nameserver", 10) != 0) continue;
+        char *p = line + 10;
+        while (*p == ' ' || *p == '	') p++;
+        if (!*p || strchr(p, ':')) continue;
+        char *e = p;
+        while (*e && *e != ' ' && *e != '	') e++;
+        *e = '\0';
+        snprintf(out, outsz, "%s", p);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    snprintf(out, outsz, "1.1.1.1");
+    return 0;
+}
+
+static int dns_encode_name(const char *name, unsigned char *buf, size_t bufsz, size_t *off) {
+    const char *p = name;
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        size_t len = dot ? (size_t)(dot - p) : strlen(p);
+        if (len == 0 || len > 63 || *off + 1 + len >= bufsz) return -1;
+        buf[(*off)++] = (unsigned char)len;
+        memcpy(buf + *off, p, len);
+        *off += len;
+        if (!dot) break;
+        p = dot + 1;
+    }
+    if (*off >= bufsz) return -1;
+    buf[(*off)++] = 0;
+    return 0;
+}
+
+static int dns_skip_name(const unsigned char *buf, size_t len, size_t *off) {
+    size_t p = *off;
+    while (p < len) {
+        unsigned char c = buf[p++];
+        if (c == 0) {
+            *off = p;
+            return 0;
+        }
+        if ((c & 0xC0) == 0xC0) {
+            if (p >= len) return -1;
+            p++;
+            *off = p;
+            return 0;
+        }
+        if ((c & 0xC0) != 0 || p + c > len) return -1;
+        p += c;
     }
     return -1;
 }
+
+static int lookup_txt_first(const char *name, char *out, size_t outsz) {
+    if (!name || !out || outsz == 0) return -1;
+    out[0] = '\0';
+
+    unsigned char query[512];
+    memset(query, 0, sizeof(query));
+    unsigned short id = (unsigned short)((now_ms() ^ (long)getpid()) & 0xffff);
+    query[0] = (unsigned char)(id >> 8);
+    query[1] = (unsigned char)(id & 0xff);
+    query[2] = 0x01;
+    query[5] = 0x01;
+    size_t qlen = 12;
+    if (dns_encode_name(name, query, sizeof(query), &qlen) != 0) return -1;
+    if (qlen + 4 > sizeof(query)) return -1;
+    query[qlen++] = 0x00;
+    query[qlen++] = 0x10;
+    query[qlen++] = 0x00;
+    query[qlen++] = 0x01;
+
+    char ns[64];
+    read_first_nameserver(ns, sizeof(ns));
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(53);
+    if (inet_pton(AF_INET, ns, &sa.sin_addr) != 1) {
+        close(fd);
+        return -1;
+    }
+
+    if (sendto(fd, query, qlen, 0, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv = {2, 0};
+    int rc = select(fd + 1, &rfds, NULL, NULL, &tv);
+    if (rc <= 0) {
+        close(fd);
+        return -1;
+    }
+
+    unsigned char answer[4096];
+    ssize_t n = recvfrom(fd, answer, sizeof(answer), 0, NULL, NULL);
+    close(fd);
+    if (n < 12) return -1;
+    size_t len = (size_t)n;
+    if (answer[0] != query[0] || answer[1] != query[1]) return -1;
+    if ((answer[3] & 0x0f) != 0) return -1;
+
+    unsigned int qd = ((unsigned int)answer[4] << 8) | answer[5];
+    unsigned int an = ((unsigned int)answer[6] << 8) | answer[7];
+    size_t off = 12;
+    for (unsigned int i = 0; i < qd; i++) {
+        if (dns_skip_name(answer, len, &off) != 0 || off + 4 > len) return -1;
+        off += 4;
+    }
+
+    for (unsigned int i = 0; i < an; i++) {
+        if (dns_skip_name(answer, len, &off) != 0 || off + 10 > len) return -1;
+        unsigned int type = ((unsigned int)answer[off] << 8) | answer[off + 1];
+        unsigned int klass = ((unsigned int)answer[off + 2] << 8) | answer[off + 3];
+        unsigned int rdlen = ((unsigned int)answer[off + 8] << 8) | answer[off + 9];
+        off += 10;
+        if (off + rdlen > len) return -1;
+        if (type == 16 && klass == 1 && rdlen > 1) {
+            size_t pos = off;
+            size_t end = off + rdlen;
+            size_t used = 0;
+            while (pos < end) {
+                unsigned int part = answer[pos++];
+                if (pos + part > end) break;
+                size_t copy = part;
+                if (used + copy >= outsz) copy = outsz - used - 1;
+                memcpy(out + used, answer + pos, copy);
+                used += copy;
+                pos += part;
+                if (used + 1 >= outsz) break;
+            }
+            out[used] = '\0';
+            return used > 0 ? 0 : -1;
+        }
+        off += rdlen;
+    }
+    return -1;
+}
+
 
 static int lookup_asn_for_ip(const char *ip, char *out, size_t outsz) {
     unsigned int a = 0, b = 0, c = 0, d = 0;
