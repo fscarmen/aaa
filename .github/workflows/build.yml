@@ -13,6 +13,7 @@ jobs:
   build-linux-glibc:
     name: Build ${{ matrix.name }} glibc dynamic
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,10 +88,16 @@ jobs:
             packages: gcc-s390x-linux-gnu libc6-dev-s390x-cross
             cc: s390x-linux-gnu-gcc
             cflags: ""
+          - name: linux-loongarch64
+            artifact: cfnat-linux-loongarch64
+            packages: gcc-loongarch64-linux-gnu libc6-dev-loong64-cross
+            cc: loongarch64-linux-gnu-gcc
+            cflags: ""
+            experimental: true
     env:
       SOURCE_FILE: cfnat_linux.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - name: Install cross compiler
         shell: bash
         run: |
@@ -109,12 +116,11 @@ jobs:
             -pthread -s
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
-          archive: false
 
   build-linux-musl:
     name: Build ${{ matrix.name }} musl static
@@ -160,18 +166,22 @@ jobs:
             artifact: cfnat-linux-mips64-musl
             zig_target: mips64-linux-musl
             cflags: ""
+            experimental: true
           - name: linux-mips64el-musl
             artifact: cfnat-linux-mips64el-musl
             zig_target: mips64el-linux-musl
             cflags: ""
+            experimental: true
           - name: linux-ppc64-musl
             artifact: cfnat-linux-ppc64-musl
             zig_target: powerpc64-linux-musl
             cflags: ""
+            experimental: true
           - name: linux-ppc64le-musl
             artifact: cfnat-linux-ppc64le-musl
             zig_target: powerpc64le-linux-musl
             cflags: ""
+            experimental: true
           - name: linux-riscv64-musl
             artifact: cfnat-linux-riscv64-musl
             zig_target: riscv64-linux-musl
@@ -180,6 +190,7 @@ jobs:
             artifact: cfnat-linux-s390x-musl
             zig_target: s390x-linux-musl
             cflags: ""
+            experimental: true
           - name: linux-loongarch64-musl
             artifact: cfnat-linux-loongarch64-musl
             zig_target: loongarch64-linux-musl
@@ -188,7 +199,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat_linux.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
@@ -211,12 +222,11 @@ jobs:
             -pthread -static -s
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
-          archive: false
 
   build-windows:
     name: Build ${{ matrix.name }}
@@ -236,7 +246,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat_windows.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - name: Install MinGW-w64
         shell: bash
         run: |
@@ -253,14 +263,13 @@ jobs:
             -O2 -pipe -std=c11 -D_WIN32_WINNT=0x0601 \
             -Wall -Wextra -Wno-unused-parameter \
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
-            -lws2_32 -lwinpthread -ldnsapi -static -s
+            -lws2_32 -ldnsapi -lwinpthread -static -s
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
-          archive: false
 
   build-macos:
     name: Build ${{ matrix.name }}
@@ -280,7 +289,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat_macos.c
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - name: Build macOS
         shell: bash
         run: |
@@ -296,12 +305,11 @@ jobs:
           strip "dist/${{ matrix.artifact }}" || true
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
-          archive: false
 
   release:
     name: Publish release
@@ -312,7 +320,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: dist
       - name: Assemble release bundle
@@ -329,7 +337,10 @@ jobs:
               *) chmod +x "package/bin/$name" "release/$name" ;;
             esac
           done
-          cp cfnat_linux.c cfnat_macos.c cfnat_windows.c README.md ips-v4 ips-v6 locations package/
+          cp cfnat_linux.c cfnat_macos.c cfnat_windows.c README.md package/
+          [ -f ips-v4 ] && cp ips-v4 package/ || true
+          [ -f ips-v6 ] && cp ips-v6 package/ || true
+          [ -f locations ] && cp locations package/ || true
           (cd package && zip -r ../release/cfnat-release.zip .)
           ls -lh package
           ls -lh release
@@ -340,6 +351,6 @@ jobs:
           cd release
           sha256sum * > sha256sums.txt
       - name: Upload GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           files: release/*
