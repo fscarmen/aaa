@@ -114,7 +114,7 @@ x86_64-w64-mingw32-gcc \
   -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat.exe \
-  -lws2_32 -ldnsapi -lwinpthread -static -s
+  -lws2_32 -ldnsapi -lwininet -lwinpthread -static -s
 ```
 
 ### 2. 启动
@@ -514,7 +514,7 @@ x86_64-w64-mingw32-gcc \
   -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat-windows-amd64.exe \
-  -lws2_32 -ldnsapi -lwinpthread -static -s
+  -lws2_32 -ldnsapi -lwininet -lwinpthread -static -s
 ```
 
 32 位：
@@ -525,7 +525,7 @@ i686-w64-mingw32-gcc \
   -finput-charset=UTF-8 -fexec-charset=UTF-8 \
   -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_windows.c -o ./cfnat-windows-386.exe \
-  -lws2_32 -ldnsapi -lwinpthread -static -s
+  -lws2_32 -ldnsapi -lwininet -lwinpthread -static -s
 ```
 
 说明：
@@ -534,7 +534,31 @@ i686-w64-mingw32-gcc \
 - `-finput-charset=UTF-8 -fexec-charset=UTF-8` 确保源码中的中文字符串按 UTF-8 编译，配合 `WriteConsoleW` 避免 Windows 7 控制台乱码。
 - Windows 网络层使用 Winsock2，因此需要 `-lws2_32`。
 - Windows TXT 查询使用 `DnsQuery_A()` / `DnsFree()`，因此需要 `-ldnsapi`。
+- Windows 自动下载数据文件使用 WinINet，不再依赖 curl/wget，因此需要 `-lwininet`。
 - Windows 线程兼容层使用 MinGW-w64 `winpthread`，因此需要 `-lwinpthread`。
+
+
+### Windows 数据文件下载说明
+
+Windows 版不再调用外部 `curl` / `wget` 命令下载数据文件，而是使用系统 WinINet API 下载。
+
+启动时会优先查找：
+
+```text
+ips-v4.txt
+ips-v6.txt
+locations.json
+```
+
+如果 release 包里只有无扩展名的数据文件，也会自动复制：
+
+```text
+ips-v4       -> ips-v4.txt
+ips-v6       -> ips-v6.txt
+locations    -> locations.json
+```
+
+Win7 如果系统 TLS 组件过旧，HTTPS 下载仍可能失败。这种情况下把上述三个数据文件放到 exe 同目录即可离线运行。
 
 ### GitHub Actions
 

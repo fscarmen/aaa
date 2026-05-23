@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <windns.h>
+#include <wininet.h>
 #include <errno.h>
 #include <locale.h>
 #include <io.h>
@@ -498,21 +499,130 @@ static int file_exists(const char *path) {
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
-static int download_file_from_urls(const char **urls, const char *filename) {
+static int copy_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = -1;
+            break;
+        }
+    }
+    if (ferror(in)) rc = -1;
+
+    fclose(out);
+    fclose(in);
+    if (rc != 0) remove(dst);
+    return rc;
+}
+
+static wchar_t *utf8_to_wide_alloc(const char *s) {
+    if (!s) return NULL;
+    int len = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (len <= 0) return NULL;
+    wchar_t *w = (wchar_t *)calloc((size_t)len, sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, len) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+static int download_file_wininet(const char *url, const char *filename) {
+    wchar_t *wurl = utf8_to_wide_alloc(url);
+    if (!wurl) return -1;
+
+    HINTERNET hnet = InternetOpenW(L"cfnat/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (!hnet) {
+        free(wurl);
+        return -1;
+    }
+
+    DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_PRAGMA_NOCACHE;
+    if (strncmp(url, "https://", 8) == 0) {
+        flags |= INTERNET_FLAG_SECURE | INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
+    }
+
+    HINTERNET hurl = InternetOpenUrlW(hnet, wurl, NULL, 0, flags, 0);
+    free(wurl);
+    if (!hurl) {
+        InternetCloseHandle(hnet);
+        return -1;
+    }
+
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "%s.tmp", filename);
-    for (int i = 0; urls[i]; i++) {
-        char cmd[1024];
-        snprintf(cmd, sizeof(cmd), "curl -fsSL '%s' -o '%s' 2>/dev/null || wget -qO '%s' '%s' 2>/dev/null", urls[i], tmp, tmp, urls[i]);
-        int rc = system(cmd);
-        if (rc == 0 && file_exists(tmp)) {
-            rename(tmp, filename);
-            return 0;
+    FILE *out = fopen(tmp, "wb");
+    if (!out) {
+        InternetCloseHandle(hurl);
+        InternetCloseHandle(hnet);
+        return -1;
+    }
+
+    char buf[16384];
+    DWORD got = 0;
+    int rc = 0;
+    for (;;) {
+        if (!InternetReadFile(hurl, buf, sizeof(buf), &got)) {
+            rc = -1;
+            break;
         }
-        unlink(tmp);
+        if (got == 0) break;
+        if (fwrite(buf, 1, got, out) != got) {
+            rc = -1;
+            break;
+        }
+    }
+
+    fclose(out);
+    InternetCloseHandle(hurl);
+    InternetCloseHandle(hnet);
+
+    if (rc != 0 || !file_exists(tmp)) {
+        remove(tmp);
+        return -1;
+    }
+
+    remove(filename);
+    if (rename(tmp, filename) != 0) {
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static int download_file_from_urls(const char **urls, const char *filename) {
+    for (int i = 0; urls[i]; i++) {
+        if (download_file_wininet(urls[i], filename) == 0) return 0;
         log_msg("从 %s 下载失败，尝试下一个源", urls[i]);
     }
     return -1;
+}
+
+static int ensure_data_file(const char *expected, const char *bundled, const char **urls) {
+    if (file_exists(expected)) return 0;
+
+    if (bundled && file_exists(bundled)) {
+        if (copy_file(bundled, expected) == 0) {
+            log_msg("已从本地 %s 复制为 %s", bundled, expected);
+            return 0;
+        }
+    }
+
+    printf("文件 %s 不存在，正在下载数据
+", expected);
+    return download_file_from_urls(urls, expected);
 }
 
 static char *read_file_all(const char *path, size_t *out_len) {
@@ -635,12 +745,9 @@ static char *json_string_value(char *p, const char *key, char *out, size_t outsz
 }
 
 static void load_locations(void) {
-    if (!file_exists("locations.json")) {
-        printf("本地 locations.json 不存在，正在下载 locations.json\n");
-        if (download_file_from_urls(LOC_URLS, "locations.json") != 0) {
-            log_msg("下载 locations.json 失败");
-            return;
-        }
+    if (ensure_data_file("locations.json", "locations", LOC_URLS) != 0) {
+        log_msg("下载 locations.json 失败");
+        return;
     }
     size_t len = 0;
     char *json = read_file_all("locations.json", &len);
@@ -1827,13 +1934,11 @@ int main(int argc, char **argv) {
     parse_args(&g_cfg, argc, argv);
     install_signals();
     const char *ipfile = g_cfg.ips_type == 6 ? "ips-v6.txt" : "ips-v4.txt";
+    const char *bundled_ipfile = g_cfg.ips_type == 6 ? "ips-v6" : "ips-v4";
     const char **urls = g_cfg.ips_type == 6 ? IPS_V6_URLS : IPS_V4_URLS;
-    if (!file_exists(ipfile)) {
-        printf("文件 %s 不存在，正在下载数据\n", ipfile);
-        if (download_file_from_urls(urls, ipfile) != 0) {
-            log_msg("下载 %s 失败", ipfile);
-            return 1;
-        }
+    if (ensure_data_file(ipfile, bundled_ipfile, urls) != 0) {
+        log_msg("下载 %s 失败", ipfile);
+        return 1;
     }
     log_msg("正在加载 locations.json");
     load_locations();
