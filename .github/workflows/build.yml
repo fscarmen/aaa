@@ -313,9 +313,6 @@ jobs:
             esac
           done
           cp cfnat_linux.c cfnat_macos.c cfnat_windows.c README.md package/
-          [ -f ips-v4 ] && cp ips-v4 package/ || true
-          [ -f ips-v6 ] && cp ips-v6 package/ || true
-          [ -f locations ] && cp locations package/ || true
           (cd package && zip -r ../release/cfnat-release.zip .)
           ls -lh package
           ls -lh release
