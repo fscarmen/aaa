@@ -233,7 +233,7 @@ jobs:
             -finput-charset=UTF-8 -fexec-charset=UTF-8 \
             -Wall -Wextra -Wno-unused-parameter \
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
-            -lws2_32 -ldnsapi -lwinpthread -static -s
+            -lws2_32 -ldnsapi -lwininet -lwinpthread -static -s
           file "dist/${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -314,9 +314,9 @@ jobs:
             esac
           done
           cp cfnat_linux.c cfnat_macos.c cfnat_windows.c README.md package/
-          [ -f ips-v4 ] && cp ips-v4 package/ || true
-          [ -f ips-v6 ] && cp ips-v6 package/ || true
-          [ -f locations ] && cp locations package/ || true
+          if [ -f ips-v4 ]; then cp ips-v4 package/; cp ips-v4 package/ips-v4.txt; fi
+          if [ -f ips-v6 ]; then cp ips-v6 package/; cp ips-v6 package/ips-v6.txt; fi
+          if [ -f locations ]; then cp locations package/; cp locations package/locations.json; fi
           (cd package && zip -r ../release/cfnat-release.zip .)
           ls -lh package
           ls -lh release
