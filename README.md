@@ -4,8 +4,6 @@
 
 C 版基于 [`cfnat.go`](cfnat.go) 移植，目标不是把功能做得更复杂，而是在保留扫描、优选、转发、健康检查、百度前置代理和运营商分池等核心能力的同时，尽量降低常驻内存占用，适合 OpenWrt、路由器、小内存 VPS、ARM 小板机等资源受限环境。
 
-> `README-build.md` 的内容已经合并到本文档。后续维护以 `README.md` 为唯一说明文档。
-
 ---
 
 ## 目录
@@ -67,7 +65,7 @@ Cloudflare 优选 IP:443 或 :80
 - 支持 IPv4 / IPv6 监听地址。
 - 支持按 Cloudflare 数据中心过滤，例如 `HKG`、`SJC`、`LAX`。
 - 候选 IP 按延迟和丢包率综合评分。
-- 固定使用 `best` 综合最优策略，已不再暴露 `-select` 参数。
+- 候选 IP 按延迟和丢包率综合评分，始终使用当前 score 最低的最优 IP。
 - 单端口同时承接 TLS 与非 TLS / HTTP 流量。
 - 根据客户端首字节自动分流到 `-port` 或 `-http-port`。
 - 支持定时健康检查与失败自动切换。
@@ -179,7 +177,6 @@ TLS 流量           → Cloudflare IP:443
 | 百度代理扫描目标 | `DEFAULT_BAIDU_SCAN_TARGET` |
 | 每个百度代理池保留节点数 | `DEFAULT_BAIDU_IPNUM` |
 | 运营商解析器配置 | `DEFAULT_CARRIER_RESOLVERS` |
-| 连接选择策略 | `DEFAULT_SELECT_STRATEGY`，当前固定为 `best` |
 
 需要调整这些值时，直接修改对应平台源码顶部的默认常量：
 
@@ -311,7 +308,22 @@ xxxx-LAX
 score = latency * 10 + loss_rate * 25
 ```
 
-所以当前策略不是单纯选择最低延迟，而是同时考虑速度和稳定性。
+所以程序不是单纯选择最低延迟，而是同时考虑速度和稳定性。
+
+### 优选原则
+
+程序没有多套选择逻辑，只有一套固定的自动优选逻辑：
+
+```text
+扫描候选
+→ 按 score 排序
+→ 永远取 score 最低的 IP
+→ 健康检查失败
+→ 切换到下一个最优候选
+→ 候选池耗尽后重新扫描并重新排序
+```
+
+这个模型可以避免轮询或随机选择带来的链路漂移，让行为更稳定、代码更简单。
 
 ### 7. 健康检查
 
@@ -400,6 +412,18 @@ Cloudflare IP
 | macOS | [`cfnat_macos.c`](cfnat_macos.c) | `pthread`、BSD socket、`resolv` |
 | Windows | [`cfnat_windows.c`](cfnat_windows.c) | Winsock2、Windows DNS API、`winpthread` |
 
+
+### Linux 发布版本选择
+
+Release 同时提供两类 Linux 文件：
+
+| 类型 | 适合用户 | 说明 |
+| --- | --- | --- |
+| glibc 动态版 | Debian、Ubuntu、Arch、CentOS、Fedora 等常规发行版 | 默认推荐，运行时使用系统自己的 glibc，避免静态 glibc 与系统环境错位 |
+| musl 静态版 | Alpine、OpenWrt、ImmortalWrt、极简容器、小内存系统 | 完全静态，更适合轻量系统和无 glibc 环境 |
+
+glibc fully-static 在部分发行版和新内核环境下可能出现 resolver、pthread、NSS、IPv6 或 DNS 初始化兼容问题，因此不再作为默认发布产物。需要完全静态时，请优先使用 musl 静态版。
+
 ### Linux 构建
 
 ```bash
@@ -413,14 +437,25 @@ gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
 ```bash
 gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
   ./cfnat_linux.c -o ./cfnat-linux \
-  -pthread -lresolv -static -s
+  -pthread -lresolv
 ```
 
 说明：
 
-- Linux 版使用 DNS TXT 查询做 ASN / 运营商识别。
-- 因此链接时必须带上 `-lresolv`。
-- 不同交叉编译工具链对完全静态链接支持不一致，失败时先去掉 `-static` 验证源码本身是否可编译。
+- Linux glibc 动态版使用 DNS TXT 查询做 ASN / 运营商识别。
+- 因此 glibc 动态版链接时必须带上 `-lresolv`。
+- 不推荐发布 glibc fully-static 版本；完全静态请使用 musl。
+
+Musl 静态版示例：
+
+```bash
+x86_64-linux-musl-gcc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter \
+  ./cfnat_linux.c -o ./cfnat-linux-amd64-musl \
+  -pthread -static -s
+```
+
+说明：musl 的 resolver 通常在 libc 内，不需要额外链接 glibc 的 `-lresolv`。
+
 
 ### macOS 构建
 
@@ -452,6 +487,19 @@ clang -O2 -pipe -std=c11 \
 - macOS arm64 最低目标通常设为 `11.0`，因为 Apple Silicon 从 macOS 11 开始支持。
 - macOS 不支持像 Linux musl 那样生成完全静态的系统 libc 二进制。
 - macOS 版同样使用 DNS TXT / ASN 查询，因此也需要 `-lresolv`。
+
+
+### Windows 中文显示
+
+Windows 版程序启动时会自动切换控制台输入/输出为 UTF-8，并设置 UTF-8 locale，用于避免中文日志乱码。
+
+如果仍然出现乱码，建议使用 Windows Terminal 或 PowerShell。传统 CMD 可手动执行：
+
+```cmd
+chcp 65001
+```
+
+推荐字体：Consolas、Cascadia Mono、Lucida Console。
 
 ### Windows 构建
 
@@ -508,7 +556,7 @@ i686-w64-mingw32-gcc \
 | Linux 出现 `res_query`、`ns_initparse`、`ns_parserr` undefined reference | 没有链接 resolver 库 | 在链接参数末尾加 `-lresolv` |
 | Windows 出现 `undefined reference to DnsQuery_A` / `DnsFree` | 没有链接 Windows DNS API | 在链接参数末尾加 `-ldnsapi` |
 | Windows 出现 Winsock 相关 undefined reference | 没有链接 Winsock2 | 加 `-lws2_32` |
-| 出现 `select_name`、`parse_select_value`、`select_summary` unused warning | `-select` 已移除，遗留辅助函数未被调用 | 不影响链接；追求干净日志时可删除遗留函数 |
+| 出现 `choose_name`、`parse_choose_value`、`choose_summary` unused warning | 遗留辅助函数未被调用 | 不影响链接；追求干净日志时可删除遗留函数 |
 | Windows 出现 `SOCKET` 与 `< 0` / `>= 0` 比较 warning | Windows `SOCKET` 是无符号类型，应使用 `INVALID_SOCKET` 判断 | 不一定导致编译失败；如开启 `-Werror` 需修正判断方式 |
 
 ---
@@ -590,7 +638,7 @@ cp locations locations.json
 ```text
 状态检查失败 (1/2): 当前 IP 104.18.x.x 暂不可用
 连续两次状态检查失败，切换到下一个 IP
-切换到新的有效 IP: 104.18.x.x 更新 IP 索引: 3
+切换到下一个最优 IP: 104.18.x.x 候选索引: 3
 ```
 
 ### 没有扫到有效 IP
@@ -648,9 +696,9 @@ Go 版仍然适合快速开发、维护和功能扩展；C 版更适合资源受
 
 然后分别转发到 `-port` 和 `-http-port`。
 
-### 2. `-select` 参数去哪了？
+### 2. `-choose` 参数去哪了？
 
-当前三平台固定使用 `best` 策略，不再暴露 `-select` 参数。
+当前三平台固定使用综合评分最低的候选 IP，不再暴露 `-choose` 参数。
 
 这样可以减少参数复杂度，也避免三平台行为不一致。
 

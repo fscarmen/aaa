@@ -33,8 +33,6 @@
 #define MAX_DOMAIN_LEN 256
 #define MAX_RESOLVER_LEN 64
 
-static const char *DEFAULT_SELECT_NAME = "best";
-#define DEFAULT_SELECT_STRATEGY SELECT_BEST
 
 static const char *DEFAULT_BAIDU_DOMAIN = "cloudnproxy.baidu.com";
 static const int DEFAULT_BAIDU_PORT = 443;
@@ -60,12 +58,6 @@ static const char *LOC_URLS[] = {
     NULL
 };
 
-typedef enum {
-    SELECT_BEST = 0,
-    SELECT_FIRST,
-    SELECT_ROTATE,
-    SELECT_RANDOM
-} SelectStrategy;
 
 typedef enum {
     LOG_SILENT = 0,
@@ -76,11 +68,10 @@ typedef enum {
 } LogLevel;
 
 typedef struct {
-    char addr[64], colo[128], domain[256], select_name[32], log_name[16];
+    char addr[64], colo[128], domain[256], log_name[16];
     char baidu_domain[MAX_DOMAIN_LEN], baidu_scan_target[MAX_ADDR_LEN], carrier_listens[256], carrier_resolvers[512];
     int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log;
     int use_baidu_proxy, baidu_port, baidu_ipnum;
-    SelectStrategy select_strategy;
     LogLevel log_level;
 } Config;
 
@@ -291,41 +282,6 @@ static int sleep_interruptible_ms(int ms) {
     return atomic_load(&g_running) ? 0 : -1;
 }
 
-static const char *select_name(SelectStrategy strategy) {
-    switch (strategy) {
-    case SELECT_FIRST:
-        return "first";
-    case SELECT_ROTATE:
-        return "rotate";
-    case SELECT_RANDOM:
-        return "random";
-    case SELECT_BEST:
-    default:
-        return "best";
-    }
-}
-
-static int parse_select_value(const char *v, SelectStrategy *out) {
-    if (!v || !*v) return -1;
-    if (!strcasecmp(v, "best")) {
-        *out = SELECT_BEST;
-        return 0;
-    }
-    if (!strcasecmp(v, "first")) {
-        *out = SELECT_FIRST;
-        return 0;
-    }
-    if (!strcasecmp(v, "rotate")) {
-        *out = SELECT_ROTATE;
-        return 0;
-    }
-    if (!strcasecmp(v, "random")) {
-        *out = SELECT_RANDOM;
-        return 0;
-    }
-    return -1;
-}
-
 static void usage(const char *p) {
     printf("Usage of %s:\n", p);
     printf("  -addr=value               本地监听的 IP 和端口 (default 0.0.0.0:1234)\n");
@@ -351,7 +307,6 @@ static void cfg_defaults(Config *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->addr, "0.0.0.0:1234");
     strcpy(c->domain, "cloudflaremirrors.com/debian");
-    strcpy(c->select_name, DEFAULT_SELECT_NAME);
     strcpy(c->log_name, "info");
     strcpy(c->baidu_domain, DEFAULT_BAIDU_DOMAIN);
     strcpy(c->baidu_scan_target, DEFAULT_BAIDU_SCAN_TARGET);
@@ -369,7 +324,6 @@ static void cfg_defaults(Config *c) {
     c->use_baidu_proxy = 0;
     c->baidu_port = DEFAULT_BAIDU_PORT;
     c->baidu_ipnum = DEFAULT_BAIDU_IPNUM;
-    c->select_strategy = DEFAULT_SELECT_STRATEGY;
     c->log_level = LOG_INFO;
 }
 
@@ -1175,20 +1129,6 @@ static int cmp_result(const void *a, const void *b) {
     return ra->loss_rate - rb->loss_rate;
 }
 
-static const char *select_summary(SelectStrategy strategy) {
-    switch (strategy) {
-    case SELECT_FIRST:
-        return "first=启动时固定首个可用 IP，失败后才切换";
-    case SELECT_ROTATE:
-        return "rotate=按候选顺序轮转使用可用 IP";
-    case SELECT_RANDOM:
-        return "random=每次连接从可用候选中随机选择 IP";
-    case SELECT_BEST:
-    default:
-        return "best=按延迟和丢包率综合评分选择当前最优 IP";
-    }
-}
-
 static void explain_selected_result(const Result *best) {
     if (!best) return;
     if (g_cfg.log_level < LOG_DEBUG) return;
@@ -1269,7 +1209,7 @@ static int switch_next_ip(BaiduProxyPool *proxy_pool) {
     for (size_t i = start; i < g_candidate_count; i++) {
         if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
             set_current_candidate(i);
-            log_msg("切换到新的有效 IP: %s 更新 IP 索引: %zu", g_candidates[i].ip, i);
+            log_msg("切换到下一个最优 IP: %s 候选索引: %zu", g_candidates[i].ip, i);
             return 1;
         }
     }
@@ -1280,37 +1220,7 @@ static int choose_ip_for_connection(char *out, size_t sz, BaiduProxyPool *proxy_
     if (!out || sz == 0) return 0;
     out[0] = '\0';
     if (g_candidate_count == 0) return 0;
-    if (g_cfg.select_strategy == SELECT_FIRST) {
-        pthread_mutex_lock(&g_ip_mu);
-        snprintf(out, sz, "%s", g_current_ip);
-        pthread_mutex_unlock(&g_ip_mu);
-        return out[0] != 0;
-    }
-    if (g_cfg.select_strategy == SELECT_RANDOM) {
-        size_t start = (size_t)(rand() % ((int)g_candidate_count));
-        for (size_t step = 0; step < g_candidate_count; step++) {
-            size_t idx = (start + step) % g_candidate_count;
-            if (health_check_ip(g_candidates[idx].ip, proxy_pool)) {
-                snprintf(out, sz, "%s", g_candidates[idx].ip);
-                return 1;
-            }
-        }
-        return 0;
-    }
-    if (g_cfg.select_strategy == SELECT_ROTATE) {
-        pthread_mutex_lock(&g_ip_mu);
-        size_t start = g_current_index;
-        pthread_mutex_unlock(&g_ip_mu);
-        for (size_t step = 1; step <= g_candidate_count; step++) {
-            size_t idx = (start + step) % g_candidate_count;
-            if (health_check_ip(g_candidates[idx].ip, proxy_pool)) {
-                set_current_candidate(idx);
-                snprintf(out, sz, "%s", g_candidates[idx].ip);
-                return 1;
-            }
-        }
-        return 0;
-    }
+
     for (size_t i = 0; i < g_candidate_count; i++) {
         if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
             snprintf(out, sz, "%s", g_candidates[i].ip);
@@ -1532,7 +1442,7 @@ static int carrier_switch_next_ip(CarrierRuntime *rt) {
     for (size_t i = start; i < rt->candidates.len; i++) {
         if (carrier_health_check_ip(rt, rt->candidates.items[i].ip)) {
             carrier_set_current_candidate(rt, i);
-            log_msg("%s 切换到新的有效 IP: %s 更新 IP 索引: %zu", carrier_display_name(rt->spec.carrier), rt->candidates.items[i].ip, i);
+            log_msg("%s 切换到下一个最优 IP: %s 候选索引: %zu", carrier_display_name(rt->spec.carrier), rt->candidates.items[i].ip, i);
             return 1;
         }
     }
@@ -1543,35 +1453,7 @@ static int carrier_choose_ip_for_connection(CarrierRuntime *rt, char *out, size_
     if (!rt || !out || sz == 0) return 0;
     out[0] = '\0';
     if (rt->candidates.len == 0) return 0;
-    if (g_cfg.select_strategy == SELECT_FIRST) {
-        carrier_get_current_ip(rt, out, sz);
-        return out[0] != 0;
-    }
-    if (g_cfg.select_strategy == SELECT_RANDOM) {
-        size_t start = (size_t)(rand() % ((int)rt->candidates.len));
-        for (size_t step = 0; step < rt->candidates.len; step++) {
-            size_t idx = (start + step) % rt->candidates.len;
-            if (carrier_health_check_ip(rt, rt->candidates.items[idx].ip)) {
-                snprintf(out, sz, "%s", rt->candidates.items[idx].ip);
-                return 1;
-            }
-        }
-        return 0;
-    }
-    if (g_cfg.select_strategy == SELECT_ROTATE) {
-        pthread_mutex_lock(&rt->candidates.mu);
-        size_t start = rt->candidates.current_index;
-        pthread_mutex_unlock(&rt->candidates.mu);
-        for (size_t step = 1; step <= rt->candidates.len; step++) {
-            size_t idx = (start + step) % rt->candidates.len;
-            if (carrier_health_check_ip(rt, rt->candidates.items[idx].ip)) {
-                carrier_set_current_candidate(rt, idx);
-                snprintf(out, sz, "%s", rt->candidates.items[idx].ip);
-                return 1;
-            }
-        }
-        return 0;
-    }
+
     for (size_t i = 0; i < rt->candidates.len; i++) {
         if (carrier_health_check_ip(rt, rt->candidates.items[i].ip)) {
             snprintf(out, sz, "%s", rt->candidates.items[i].ip);
