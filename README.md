@@ -215,3 +215,7 @@ WinSock 的 `setsockopt` 第 4 个参数类型是 `const char *`，`getsockopt` 
 
 - `macos-amd64` 固定到 `macos-13`
 - `macos-arm64` 固定到 `macos-14-arm64`
+
+### Windows 386 为什么不能手动 typedef ssize_t
+
+MSYS2 MINGW32 的 `corecrt.h` 已经定义了 `ssize_t`，并且 32 位下通常是 `int`。源码不要再写 `typedef SSIZE_T ssize_t;`，否则会和系统头文件冲突。当前源码使用内部类型 `bcf_ssize_t` 来承接 `send()` / `recv()` 返回值，避免污染系统类型命名空间。

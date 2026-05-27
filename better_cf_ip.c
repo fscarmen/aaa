@@ -31,7 +31,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 typedef SOCKET bcf_socket_t;
-typedef SSIZE_T ssize_t;
+typedef SSIZE_T bcf_ssize_t;
 #define BCF_INVALID_SOCKET INVALID_SOCKET
 #define BCF_CLOSE_SOCKET closesocket
 #define BCF_SOCKET_ERROR WSAGetLastError()
@@ -51,6 +51,7 @@ typedef SSIZE_T ssize_t;
 #include <sys/types.h>
 #include <unistd.h>
 typedef int bcf_socket_t;
+typedef ssize_t bcf_ssize_t;
 #define BCF_INVALID_SOCKET (-1)
 #define BCF_CLOSE_SOCKET close
 #define BCF_SOCKET_ERROR errno
@@ -881,7 +882,7 @@ static int send_all_deadline(bcf_socket_t fd, const char *buf, size_t len, long 
     while (sent < len) {
         int rem = (int)(deadline_ms - now_ms());
         if (wait_fd(fd, 1, rem) != 0) return -1;
-        ssize_t n = send(fd, buf + sent, (int)(len - sent), 0);
+        bcf_ssize_t n = send(fd, buf + sent, (int)(len - sent), 0);
         if (n <= 0) return -1;
         sent += (size_t)n;
     }
@@ -930,7 +931,7 @@ static int read_headers_raw(bcf_socket_t fd, long long deadline_ms) {
     while (len < MAX_HEADER_SIZE) {
         int rem = (int)(deadline_ms - now_ms());
         if (wait_fd(fd, 0, rem) != 0) return -1;
-        ssize_t n = recv(fd, headers + len, (int)(MAX_HEADER_SIZE - len), 0);
+        bcf_ssize_t n = recv(fd, headers + len, (int)(MAX_HEADER_SIZE - len), 0);
         if (n <= 0) return -1;
         len += (size_t)n;
         headers[len] = '\0';
