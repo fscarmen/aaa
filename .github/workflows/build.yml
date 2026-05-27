@@ -186,9 +186,9 @@ jobs:
           path: dist/better-cf-ip-c-${{ matrix.target }}
           if-no-files-found: error
 
-  build-windows:
+  build-windows-x86:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'windows-amd64' || inputs.target == 'windows-386' || inputs.target == 'windows-arm64' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
+    if: ${{ github.event_name == 'push' || inputs.target == 'windows-amd64' || inputs.target == 'windows-386' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -204,11 +204,6 @@ jobs:
             package_prefix: mingw-w64-i686
             cc: gcc
             winver: "0x0601"
-          - target: windows-arm64
-            msystem: CLANGARM64
-            package_prefix: mingw-w64-clang-aarch64
-            cc: clang
-            winver: "0x0A00"
     defaults:
       run:
         shell: msys2 {0}
@@ -260,9 +255,78 @@ jobs:
           path: dist/better-cf-ip-c-${{ matrix.target }}.exe
           if-no-files-found: error
 
+  build-windows-arm64:
+    name: Build windows-arm64
+    if: ${{ github.event_name == 'push' || inputs.target == 'windows-arm64' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-aarch64-headers
+            mingw-w64-clang-aarch64-crt
+            mingw-w64-clang-aarch64-compiler-rt
+            mingw-w64-clang-aarch64-libunwind
+            mingw-w64-clang-aarch64-winpthreads
+            mingw-w64-clang-aarch64-curl
+            mingw-w64-clang-aarch64-openssl
+            file
+
+      - name: Build windows-arm64 by cross clang
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          export TARGET_TRIPLE="aarch64-w64-windows-gnu"
+          export TARGET_SYSROOT="/clangarm64"
+          export PKG_CONFIG="/clang64/bin/pkg-config"
+          export PKG_CONFIG_LIBDIR="$TARGET_SYSROOT/lib/pkgconfig"
+          export PKG_CONFIG_PATH=""
+          export PKG_CONFIG_SYSROOT_DIR=""
+
+          WIN_CFLAGS="$($PKG_CONFIG --static --cflags libcurl openssl)"
+          WIN_LIBS="$($PKG_CONFIG --static --libs libcurl openssl)"
+          echo "WIN_CFLAGS=$WIN_CFLAGS"
+          echo "WIN_LIBS=$WIN_LIBS"
+
+          /clang64/bin/clang -O2 -pipe -std=c11 \
+            --target="$TARGET_TRIPLE" \
+            --sysroot="$TARGET_SYSROOT" \
+            -fuse-ld=lld \
+            -DWINVER=0x0A00 \
+            -D_WIN32_WINNT=0x0A00 \
+            -DCURL_STATICLIB \
+            -finput-charset=UTF-8 \
+            -fexec-charset=UTF-8 \
+            -Wall -Wextra -Wno-unused-parameter \
+            $WIN_CFLAGS \
+            "$SRC_FILE" \
+            -o "dist/$APP_NAME-windows-arm64.exe" \
+            $WIN_LIBS \
+            -lws2_32 -lcrypt32 -lbcrypt -lwinpthread \
+            -static -Wl,-s
+          file "dist/$APP_NAME-windows-arm64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: better-cf-ip-c-windows-arm64
+          path: dist/better-cf-ip-c-windows-arm64.exe
+          if-no-files-found: error
+
   release:
     name: Publish release
-    needs: [build-linux-amd64, build-linux-docker, build-macos, build-windows]
+    needs: [build-linux-amd64, build-linux-docker, build-macos, build-windows-x86, build-windows-arm64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
