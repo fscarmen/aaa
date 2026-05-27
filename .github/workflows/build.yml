@@ -13,10 +13,18 @@ on:
         type: choice
         options:
           - linux-amd64
+          - linux-arm64
+          - linux-amd64-musl
+          - linux-arm64-musl
           - macos-amd64
           - macos-arm64
           - windows-amd64
           - windows-386
+          - windows-arm64
+          - all-linux
+          - all-linux-musl
+          - all-macos
+          - all-windows
           - all-supported
 
 permissions:
@@ -27,9 +35,9 @@ env:
   SRC_FILE: better_cf_ip.c
 
 jobs:
-  build-linux:
+  build-linux-amd64:
     name: Build linux-amd64
-    if: ${{ github.event_name == 'push' || inputs.target == 'linux-amd64' || inputs.target == 'all-supported' }}
+    if: ${{ github.event_name == 'push' || inputs.target == 'linux-amd64' || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,9 +73,70 @@ jobs:
           path: dist/better-cf-ip-c-linux-amd64
           if-no-files-found: error
 
+  build-linux-docker:
+    name: Build ${{ matrix.target }}
+    if: ${{ github.event_name == 'push' || inputs.target == 'linux-arm64' || inputs.target == 'linux-amd64-musl' || inputs.target == 'linux-arm64-musl' || inputs.target == 'all-linux' || inputs.target == 'all-linux-musl' || inputs.target == 'all-supported' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-arm64
+            selector: linux-arm64
+            group: all-linux
+            platform: linux/arm64
+            image: ubuntu:24.04
+            shell: bash
+            install: apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libcurl4-openssl-dev libssl-dev file ca-certificates
+            output: better-cf-ip-c-linux-arm64
+            command: cc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter better_cf_ip.c -o dist/better-cf-ip-c-linux-arm64 $(pkg-config --cflags --libs libcurl openssl) -pthread
+          - target: linux-amd64-musl
+            selector: linux-amd64-musl
+            group: all-linux-musl
+            platform: linux/amd64
+            image: alpine:3.20
+            shell: sh
+            install: apk add --no-cache build-base pkgconf curl-dev openssl-dev linux-headers file ca-certificates
+            output: better-cf-ip-c-linux-amd64-musl
+            command: cc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter better_cf_ip.c -o dist/better-cf-ip-c-linux-amd64-musl $(pkg-config --cflags --libs libcurl openssl) -pthread
+          - target: linux-arm64-musl
+            selector: linux-arm64-musl
+            group: all-linux-musl
+            platform: linux/arm64
+            image: alpine:3.20
+            shell: sh
+            install: apk add --no-cache build-base pkgconf curl-dev openssl-dev linux-headers file ca-certificates
+            output: better-cf-ip-c-linux-arm64-musl
+            command: cc -O2 -pipe -std=c11 -Wall -Wextra -Wno-unused-parameter better_cf_ip.c -o dist/better-cf-ip-c-linux-arm64-musl $(pkg-config --cflags --libs libcurl openssl) -pthread
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        if: ${{ matrix.platform == 'linux/arm64' }}
+
+      - name: Build ${{ matrix.target }} in container
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.selector || inputs.target == matrix.group || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm \
+            --platform "${{ matrix.platform }}" \
+            -v "$PWD:/work" \
+            -w /work \
+            "${{ matrix.image }}" \
+            ${{ matrix.shell }} -lc '${{ matrix.install }} && mkdir -p dist && ${{ matrix.command }} && file dist/${{ matrix.output }}'
+          chmod +x "dist/${{ matrix.output }}"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.selector || inputs.target == matrix.group || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
+        with:
+          name: better-cf-ip-c-${{ matrix.target }}
+          path: dist/${{ matrix.output }}
+          if-no-files-found: error
+
   build-macos:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'macos-amd64' || inputs.target == 'macos-arm64' || inputs.target == 'all-supported' }}
+    if: ${{ github.event_name == 'push' || inputs.target == 'macos-amd64' || inputs.target == 'macos-arm64' || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
     strategy:
       fail-fast: false
       matrix:
@@ -85,14 +154,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           brew install pkg-config openssl@3 curl || true
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build ${{ matrix.target }}
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -109,7 +178,7 @@ jobs:
           file "dist/$APP_NAME-${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         with:
           name: better-cf-ip-c-${{ matrix.target }}
           path: dist/better-cf-ip-c-${{ matrix.target }}
@@ -117,7 +186,7 @@ jobs:
 
   build-windows:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'windows-amd64' || inputs.target == 'windows-386' || inputs.target == 'all-supported' }}
+    if: ${{ github.event_name == 'push' || inputs.target == 'windows-amd64' || inputs.target == 'windows-386' || inputs.target == 'windows-arm64' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -127,10 +196,17 @@ jobs:
             msystem: MINGW64
             package_prefix: mingw-w64-x86_64
             cc: gcc
+            winver: "0x0601"
           - target: windows-386
             msystem: MINGW32
             package_prefix: mingw-w64-i686
             cc: gcc
+            winver: "0x0601"
+          - target: windows-arm64
+            msystem: CLANGARM64
+            package_prefix: mingw-w64-clang-aarch64
+            cc: clang
+            winver: "0x0A00"
     defaults:
       run:
         shell: msys2 {0}
@@ -143,7 +219,7 @@ jobs:
           update: true
           install: >-
             base-devel
-            ${{ matrix.package_prefix }}-gcc
+            ${{ matrix.package_prefix }}-${{ matrix.cc }}
             ${{ matrix.package_prefix }}-pkgconf
             ${{ matrix.package_prefix }}-curl
             ${{ matrix.package_prefix }}-openssl
@@ -151,13 +227,13 @@ jobs:
             file
 
       - name: Build ${{ matrix.target }}
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          gcc -O2 -pipe -std=c11 \
-            -DWINVER=0x0601 \
-            -D_WIN32_WINNT=0x0601 \
+          ${{ matrix.cc }} -O2 -pipe -std=c11 \
+            -DWINVER=${{ matrix.winver }} \
+            -D_WIN32_WINNT=${{ matrix.winver }} \
             -finput-charset=UTF-8 \
             -fexec-charset=UTF-8 \
             -Wall -Wextra -Wno-unused-parameter \
@@ -169,7 +245,7 @@ jobs:
           file "dist/$APP_NAME-${{ matrix.target }}.exe"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
+        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
         with:
           name: better-cf-ip-c-${{ matrix.target }}
           path: dist/better-cf-ip-c-${{ matrix.target }}.exe
@@ -177,7 +253,7 @@ jobs:
 
   release:
     name: Publish release
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux-amd64, build-linux-docker, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
