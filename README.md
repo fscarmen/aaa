@@ -162,3 +162,23 @@ rm -rf dist
 - Linux 容器内只能验证 Linux 构建和基础启动流程。
 - Windows Win7 兼容必须用真实 Win7 SP1 或对应虚拟机最终验收。
 - macOS 通用二进制没有默认合并；当前按 `macos-amd64` 和 `macos-arm64` 分开输出。
+
+## GitHub Actions 常见问题
+
+### macOS 提示 `./scripts/build.sh: Permission denied`
+
+这是脚本可执行位没有被 Git 正确提交导致的。仓库里应执行：
+
+```bash
+git update-index --chmod=+x scripts/build.sh
+git commit -m "fix: mark build script executable"
+```
+
+工作流里已经使用 `bash ./scripts/build.sh <target>`，即使可执行位丢失也可以继续构建。
+
+### macos-amd64 不要跑在 macos-14-arm64 上
+
+`macos-amd64` 必须使用 Intel runner，例如 `macos-13`。如果在 `macos-14-arm64` 上用 Homebrew 的 `/opt/homebrew` 依赖去链接 x86_64，下一步会遇到架构不匹配。当前 workflow 已经把：
+
+- `macos-amd64` 固定到 `macos-13`
+- `macos-arm64` 固定到 `macos-14-arm64`
