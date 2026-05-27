@@ -121,10 +121,12 @@ jobs:
           mkdir -p dist
           docker run --rm \
             --platform "${{ matrix.platform }}" \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
             -v "$PWD:/work" \
             -w /work \
             "${{ matrix.image }}" \
-            ${{ matrix.shell }} -lc '${{ matrix.install }} && mkdir -p dist && ${{ matrix.command }} && file dist/${{ matrix.output }}'
+            ${{ matrix.shell }} -lc '${{ matrix.install }} && mkdir -p dist && ${{ matrix.command }} && file dist/${{ matrix.output }} && chown -R "$HOST_UID:$HOST_GID" dist'
           chmod +x "dist/${{ matrix.output }}"
 
       - uses: actions/upload-artifact@v4
