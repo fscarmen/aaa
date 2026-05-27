@@ -75,23 +75,20 @@ make
 better-cf-ip-c
 ```
 
-### 交互式选择版本
+### GitHub Actions 选择版本
 
-```bash
-./scripts/build.sh
-```
+本项目不再使用 `scripts/build.sh`。所有平台构建逻辑都直接写在 `.github/workflows/build.yml` 里，避免脚本权限、换行和 shell 环境差异导致失败。
 
-默认目标是 `linux-amd64`。也可以直接指定：
+在 GitHub Actions 手动运行 workflow 时选择目标：
 
-```bash
-./scripts/build.sh linux-amd64
-./scripts/build.sh macos-amd64
-./scripts/build.sh macos-arm64
-./scripts/build.sh windows-amd64
-./scripts/build.sh windows-386
-```
+- `linux-amd64`
+- `macos-amd64`
+- `macos-arm64`
+- `windows-amd64`
+- `windows-386`
+- `all-supported`
 
-产物输出到 `dist/`。
+产物输出到 workflow artifact；打 tag 时会自动进入 Release。
 
 ## 运行
 
@@ -165,16 +162,9 @@ rm -rf dist
 
 ## GitHub Actions 常见问题
 
-### macOS 提示 `./scripts/build.sh: Permission denied`
+### 为什么没有 `scripts/build.sh`
 
-这是脚本可执行位没有被 Git 正确提交导致的。仓库里应执行：
-
-```bash
-git update-index --chmod=+x scripts/build.sh
-git commit -m "fix: mark build script executable"
-```
-
-工作流里已经使用 `bash ./scripts/build.sh <target>`，即使可执行位丢失也可以继续构建。
+为了让仓库在 GitHub Actions 上更稳，构建命令全部内联在 `.github/workflows/build.yml`。这样不会再出现 `Permission denied`、CRLF 换行、可执行位丢失等脚本类问题。
 
 ### macos-amd64 不要跑在 macos-14-arm64 上
 
