@@ -133,30 +133,48 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-          for pkg in pkgconf openssl@3 curl; do
+          for pkg in openssl@3; do
             if brew list --formula "$pkg" >/dev/null 2>&1; then
               echo "$pkg already installed"
             else
               brew install "$pkg"
             fi
           done
-          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build ${{ matrix.target }}
         run: |
           set -euo pipefail
           mkdir -p dist
+
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          if [ ! -f "$OPENSSL_PREFIX/lib/libssl.a" ] || [ ! -f "$OPENSSL_PREFIX/lib/libcrypto.a" ]; then
+            echo "::error::Missing static OpenSSL libraries under $OPENSSL_PREFIX/lib"
+            ls -la "$OPENSSL_PREFIX/lib" || true
+            exit 1
+          fi
+
           clang -O2 -pipe -std=c11 \
             -Wall -Wextra -Wno-unused-parameter \
             -arch "${{ matrix.arch }}" \
             -mmacosx-version-min="${{ matrix.minver }}" \
+            -I"$OPENSSL_PREFIX/include" \
             "$SRC_FILE" \
             -o "dist/$APP_NAME-${{ matrix.target }}" \
-            $(pkg-config --cflags --libs libcurl openssl) \
+            "$OPENSSL_PREFIX/lib/libssl.a" \
+            "$OPENSSL_PREFIX/lib/libcrypto.a" \
+            -lcurl -lz \
+            -framework Security \
+            -framework CoreFoundation \
             -pthread
+
           strip "dist/$APP_NAME-${{ matrix.target }}" 2>/dev/null || true
           chmod +x "dist/$APP_NAME-${{ matrix.target }}"
           file "dist/$APP_NAME-${{ matrix.target }}"
+          otool -L "dist/$APP_NAME-${{ matrix.target }}"
+          if otool -L "dist/$APP_NAME-${{ matrix.target }}" | grep -E '/usr/local/opt|/opt/homebrew/opt|libssl|libcrypto'; then
+            echo "::error::macOS binary still depends on Homebrew dynamic libraries"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
