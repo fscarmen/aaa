@@ -85,6 +85,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: docker/setup-qemu-action@v4
         if: ${{ matrix.platform == 'linux/arm64' }}
+        with:
+          use-cache: false
       - name: Build ${{ matrix.target }} in container
         run: |
           set -euo pipefail
