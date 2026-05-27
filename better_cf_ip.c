@@ -755,6 +755,27 @@ static int set_fd_blocking(bcf_socket_t fd, int blocking) {
 #endif
 }
 
+
+static int bcf_setsockopt_int(bcf_socket_t fd, int level, int optname, int value) {
+#ifdef _WIN32
+    const char *optval = (const char *)&value;
+#else
+    const void *optval = (const void *)&value;
+#endif
+    return setsockopt(fd, level, optname, optval, (socklen_t)sizeof(value));
+}
+
+static int bcf_getsockopt_int(bcf_socket_t fd, int level, int optname, int *value) {
+    if (!value) return -1;
+#ifdef _WIN32
+    int len = (int)sizeof(*value);
+    return getsockopt(fd, level, optname, (char *)value, &len);
+#else
+    socklen_t len = (socklen_t)sizeof(*value);
+    return getsockopt(fd, level, optname, value, &len);
+#endif
+}
+
 static int set_socket_timeout_ms(bcf_socket_t fd, int timeout_ms) {
     if (timeout_ms < 1) timeout_ms = 1;
 #ifdef _WIN32
@@ -794,7 +815,7 @@ static bcf_socket_t connect_tcp_timeout(const char *ip, int port, int timeout_ms
     if (fd == BCF_INVALID_SOCKET) return BCF_INVALID_SOCKET;
 
     int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    (void)bcf_setsockopt_int(fd, IPPROTO_TCP, TCP_NODELAY, one);
 
     if (set_fd_blocking(fd, 0) != 0) {
         BCF_CLOSE_SOCKET(fd);
@@ -831,8 +852,7 @@ static bcf_socket_t connect_tcp_timeout(const char *ip, int port, int timeout_ms
             return BCF_INVALID_SOCKET;
         }
         int so_error = 0;
-        socklen_t len = sizeof(so_error);
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
+        if (bcf_getsockopt_int(fd, SOL_SOCKET, SO_ERROR, &so_error) != 0 || so_error != 0) {
             BCF_CLOSE_SOCKET(fd);
             return BCF_INVALID_SOCKET;
         }
