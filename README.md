@@ -105,22 +105,7 @@ better-cf-ip-c
 
 本项目不使用 `scripts/build.sh`。所有平台构建逻辑都直接写在 `.github/workflows/build.yml` 里，避免脚本权限、换行和 shell 环境差异导致失败。
 
-手动运行 workflow 时可以选择：
-
-- `linux-amd64`
-- `linux-arm64`
-- `linux-amd64-musl`
-- `linux-arm64-musl`
-- `macos-amd64`
-- `macos-arm64`
-- `windows-amd64`
-- `windows-386`
-- `windows-arm64`
-- `all-linux`
-- `all-linux-musl`
-- `all-macos`
-- `all-windows`
-- `all-supported`
+手动运行 workflow 时不再需要选择目标平台；每次运行都会直接编译全部支持的平台：Linux、macOS、Windows，以及 amd64、arm64、musl 等产物。
 
 产物输出到 workflow artifact；打 tag 时会自动进入 Release。
 
