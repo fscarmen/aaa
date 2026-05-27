@@ -5,27 +5,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      target:
-        description: "Choose build target"
-        required: true
-        default: "linux-amd64"
-        type: choice
-        options:
-          - linux-amd64
-          - linux-arm64
-          - linux-amd64-musl
-          - linux-arm64-musl
-          - macos-amd64
-          - macos-arm64
-          - windows-amd64
-          - windows-386
-          - windows-arm64
-          - all-linux
-          - all-linux-musl
-          - all-macos
-          - all-windows
-          - all-supported
 
 permissions:
   contents: write
@@ -37,7 +16,6 @@ env:
 jobs:
   build-linux-amd64:
     name: Build linux-amd64
-    if: ${{ github.event_name == 'push' || inputs.target == 'linux-amd64' || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +53,6 @@ jobs:
 
   build-linux-docker:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'linux-arm64' || inputs.target == 'linux-amd64-musl' || inputs.target == 'linux-arm64-musl' || inputs.target == 'all-linux' || inputs.target == 'all-linux-musl' || inputs.target == 'all-supported' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -115,7 +92,6 @@ jobs:
         if: ${{ matrix.platform == 'linux/arm64' }}
 
       - name: Build ${{ matrix.target }} in container
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.selector || inputs.target == matrix.group || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -130,7 +106,6 @@ jobs:
           chmod +x "dist/${{ matrix.output }}"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.selector || inputs.target == matrix.group || inputs.target == 'all-linux' || inputs.target == 'all-supported' }}
         with:
           name: better-cf-ip-c-${{ matrix.target }}
           path: dist/${{ matrix.output }}
@@ -138,7 +113,6 @@ jobs:
 
   build-macos:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'macos-amd64' || inputs.target == 'macos-arm64' || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
     strategy:
       fail-fast: false
       matrix:
@@ -152,19 +126,16 @@ jobs:
             arch: arm64
             minver: "11.0"
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           brew install pkg-config openssl@3 curl || true
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build ${{ matrix.target }}
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -181,7 +152,6 @@ jobs:
           file "dist/$APP_NAME-${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-macos' || inputs.target == 'all-supported' }}
         with:
           name: better-cf-ip-c-${{ matrix.target }}
           path: dist/better-cf-ip-c-${{ matrix.target }}
@@ -189,7 +159,6 @@ jobs:
 
   build-windows-x86:
     name: Build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' || inputs.target == 'windows-amd64' || inputs.target == 'windows-386' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -225,7 +194,6 @@ jobs:
             file
 
       - name: Build ${{ matrix.target }}
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -250,7 +218,6 @@ jobs:
           file "dist/$APP_NAME-${{ matrix.target }}.exe"
 
       - uses: actions/upload-artifact@v4
-        if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
         with:
           name: better-cf-ip-c-${{ matrix.target }}
           path: dist/better-cf-ip-c-${{ matrix.target }}.exe
@@ -258,7 +225,6 @@ jobs:
 
   build-windows-arm64:
     name: Build windows-arm64
-    if: ${{ github.event_name == 'push' || inputs.target == 'windows-arm64' || inputs.target == 'all-windows' || inputs.target == 'all-supported' }}
     runs-on: windows-2022
     defaults:
       run:
@@ -300,6 +266,20 @@ jobs:
           WIN_LIBS="$($PKG_CONFIG --static --libs libcurl openssl)"
           echo "WIN_CFLAGS=$WIN_CFLAGS"
           echo "WIN_LIBS=$WIN_LIBS"
+
+          CLANG_RESOURCE_DIR="$(/clang64/bin/clang -print-resource-dir)"
+          CLANG_VERSION="$(basename "$CLANG_RESOURCE_DIR")"
+          BUILTINS_SRC="$TARGET_SYSROOT/lib/clang/$CLANG_VERSION/lib/windows/libclang_rt.builtins-aarch64.a"
+          BUILTINS_DIR="$CLANG_RESOURCE_DIR/lib/$TARGET_TRIPLE"
+          BUILTINS_DST="$BUILTINS_DIR/libclang_rt.builtins.a"
+          if [ ! -f "$BUILTINS_SRC" ]; then
+            echo "::error::Missing compiler-rt builtins: $BUILTINS_SRC"
+            find "$TARGET_SYSROOT/lib/clang" -name 'libclang_rt.builtins*' -print || true
+            exit 1
+          fi
+          mkdir -p "$BUILTINS_DIR"
+          cp -f "$BUILTINS_SRC" "$BUILTINS_DST"
+          echo "Using compiler-rt builtins: $BUILTINS_DST"
 
           /clang64/bin/clang -O2 -pipe -std=c11 \
             --target="$TARGET_TRIPLE" \
