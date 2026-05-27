@@ -1,34 +1,27 @@
+APP := better-cf-ip-c
+SRC := better_cf_ip.c
 CC ?= cc
-PKG_CONFIG ?= pkg-config
-TARGET ?= qrencode
-CFLAGS ?= -O2 -pipe -std=c17 -Wall -Wextra -Werror
-LDFLAGS ?=
-STATIC ?= 0
-UNAME_S := $(shell uname -s 2>/dev/null || echo unknown)
-
-SRC := main.c render.c
-OBJ := $(SRC:.c=.o)
-
-ifeq ($(STATIC),1)
-ifneq ($(UNAME_S),Darwin)
-LDFLAGS += -static
-endif
-PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --static --libs libqrencode)
-else
-PKG_CONFIG_LIBS = $(shell $(PKG_CONFIG) --libs libqrencode)
+CFLAGS ?= -O3 -std=c11 -Wall -Wextra -Wno-unused-parameter -pedantic
+PKG_CFLAGS := $(shell pkg-config --cflags libcurl openssl 2>/dev/null)
+PKG_LIBS := $(shell pkg-config --libs libcurl openssl 2>/dev/null)
+ifeq ($(strip $(PKG_LIBS)),)
+PKG_LIBS := -lcurl -lssl -lcrypto
 endif
 
-PKG_CONFIG_CFLAGS = $(shell $(PKG_CONFIG) --cflags libqrencode)
+.PHONY: all clean dist linux-amd64
 
-all: $(TARGET)
+all: $(APP)
 
-$(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $@ $(LDFLAGS) $(PKG_CONFIG_LIBS)
+$(APP): $(SRC)
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -o $@ $< $(PKG_LIBS) -pthread
 
-%.o: %.c render.h
-	$(CC) $(CFLAGS) $(PKG_CONFIG_CFLAGS) -c $< -o $@
+linux-amd64: dist
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -o dist/$(APP)-linux-amd64 $(SRC) $(PKG_LIBS) -pthread
+	chmod +x dist/$(APP)-linux-amd64
+
+dist:
+	mkdir -p dist
 
 clean:
-	rm -f $(OBJ) $(TARGET)
-
-.PHONY: all clean
+	rm -f $(APP)
+	rm -rf dist
