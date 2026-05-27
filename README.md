@@ -23,7 +23,7 @@
 | macOS Apple Silicon | `macos-arm64` | 支持 | 最低建议 macOS 11，runner 使用 `macos-14-arm64`。 |
 | Windows x64 | `windows-amd64` | 支持 | MSYS2 MINGW64，目标 Win7 SP1+。 |
 | Windows x86 | `windows-386` | 支持 | MSYS2 MINGW32，用于旧机器和旧系统，目标 Win7 SP1+。 |
-| Windows ARM64 | `windows-arm64` | 支持编译 | MSYS2 CLANGARM64。注意：Windows ARM64 不支持 Win7，目标是 Windows 10/11 ARM64。 |
+| Windows ARM64 | `windows-arm64` | 支持交叉编译 | GitHub Actions 使用 CLANG64 宿主工具链读取 CLANGARM64 sysroot 交叉编译。注意：Windows ARM64 不支持 Win7，目标是 Windows 10/11 ARM64。 |
 
 > Windows 7 支持只覆盖 `windows-amd64` 和 `windows-386`。`windows-arm64` 没有 Win7 这个系统形态，别把它们混在一起。
 
@@ -77,16 +77,15 @@ pacman -S --needed \
 
 ### Windows ARM64
 
-MSYS2 CLANGARM64：
+GitHub Actions 不直接进入 `CLANGARM64` 执行 ARM64 工具。GitHub 托管 Windows runner 是 x64，直接运行 `/clangarm64/bin/pkg-config`、`/clangarm64/bin/clang` 会报 `Exec format error`。
+
+当前 workflow 使用 `CLANG64` 作为宿主环境，安装 x64 可执行的 clang/pkg-config，同时安装 CLANGARM64 的 headers、crt、compiler-rt、libunwind、curl、openssl、winpthreads 作为目标 sysroot，然后用：
 
 ```bash
-pacman -S --needed \
-  mingw-w64-clang-aarch64-clang \
-  mingw-w64-clang-aarch64-pkgconf \
-  mingw-w64-clang-aarch64-curl \
-  mingw-w64-clang-aarch64-openssl \
-  mingw-w64-clang-aarch64-winpthreads
+/clang64/bin/clang --target=aarch64-w64-windows-gnu --sysroot=/clangarm64
 ```
+
+来交叉编译 `windows-arm64`。
 
 ## 编译
 
@@ -219,3 +218,7 @@ WinSock 的 `setsockopt` 第 4 个参数类型是 `const char *`，`getsockopt` 
 ### Windows 386 为什么不能手动 typedef ssize_t
 
 MSYS2 MINGW32 的 `corecrt.h` 已经定义了 `ssize_t`，并且 32 位下通常是 `int`。源码不要再写 `typedef SSIZE_T ssize_t;`，否则会和系统头文件冲突。当前源码使用内部类型 `bcf_ssize_t` 来承接 `send()` / `recv()` 返回值，避免污染系统类型命名空间。
+
+### Windows ARM64 为什么不能直接用 CLANGARM64
+
+GitHub 托管 Windows runner 是 x64。`CLANGARM64` 目录里的工具程序是 ARM64 PE，可作为目标文件和库使用，但不能在 x64 runner 上直接执行。之前失败的 `cannot execute binary file: Exec format error` 就是这个原因。当前 workflow 已改成 `CLANG64` 宿主工具链 + `/clangarm64` 目标 sysroot 的交叉编译方式。
