@@ -233,15 +233,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          export PKG_CONFIG="pkg-config --static"
+          WIN_CFLAGS="$($PKG_CONFIG --cflags libcurl openssl)"
+          WIN_LIBS="$($PKG_CONFIG --libs libcurl openssl)"
+          echo "WIN_CFLAGS=$WIN_CFLAGS"
+          echo "WIN_LIBS=$WIN_LIBS"
           ${{ matrix.cc }} -O2 -pipe -std=c11 \
             -DWINVER=${{ matrix.winver }} \
             -D_WIN32_WINNT=${{ matrix.winver }} \
+            -DCURL_STATICLIB \
             -finput-charset=UTF-8 \
             -fexec-charset=UTF-8 \
             -Wall -Wextra -Wno-unused-parameter \
+            $WIN_CFLAGS \
             "$SRC_FILE" \
             -o "dist/$APP_NAME-${{ matrix.target }}.exe" \
-            $(pkg-config --cflags --libs libcurl openssl) \
+            $WIN_LIBS \
             -lws2_32 -lcrypt32 -lbcrypt -lwinpthread \
             -static -s
           file "dist/$APP_NAME-${{ matrix.target }}.exe"
