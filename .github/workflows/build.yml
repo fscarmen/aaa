@@ -12,6 +12,7 @@ permissions:
 env:
   APP_NAME: better-cf-ip-c
   SRC_FILE: better_cf_ip.c
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-linux-amd64:
@@ -132,7 +133,13 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-          brew install pkg-config openssl@3 curl || true
+          for pkg in pkgconf openssl@3 curl; do
+            if brew list --formula "$pkg" >/dev/null 2>&1; then
+              echo "$pkg already installed"
+            else
+              brew install "$pkg"
+            fi
+          done
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Build ${{ matrix.target }}
