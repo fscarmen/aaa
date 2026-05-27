@@ -149,6 +149,11 @@ Windows：
 .\better-cf-ip-c-windows-amd64.exe
 ```
 
+
+### Windows 静态链接说明
+
+Windows 构建使用 `-DCURL_STATICLIB` 和 `pkg-config --static`。这是为了避免 MinGW 头文件按 DLL 导入方式生成 `__imp_curl_*` 符号，但链接阶段又使用 `-static` 导致找不到 libcurl 符号。不要把 `-static` 和默认 DLL 导入宏混着用，混了就会出现 `undefined reference to __imp_curl_easy_init` 这类错误。
+
 ## Windows 控制台、字体和编码
 
 Windows 版本启动后会调用：
