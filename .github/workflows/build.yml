@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "选择要编译的版本"
+        description: "Choose build target"
         required: true
         default: "linux-amd64"
         type: choice
@@ -22,6 +22,10 @@ on:
 permissions:
   contents: write
 
+env:
+  APP_NAME: better-cf-ip-c
+  SRC_FILE: better_cf_ip.c
+
 jobs:
   build-linux:
     name: Build linux-amd64
@@ -29,15 +33,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libcurl4-openssl-dev libssl-dev file ca-certificates
-      - name: Build
+            build-essential \
+            pkg-config \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            file \
+            ca-certificates
+
+      - name: Build linux-amd64
         run: |
-          ./scripts/build.sh linux-amd64
-          file dist/better-cf-ip-c-linux-amd64
+          set -euo pipefail
+          mkdir -p dist
+          cc -O2 -pipe -std=c11 \
+            -Wall -Wextra -Wno-unused-parameter \
+            "$SRC_FILE" \
+            -o "dist/$APP_NAME-linux-amd64" \
+            $(pkg-config --cflags --libs libcurl openssl) \
+            -pthread
+          chmod +x "dist/$APP_NAME-linux-amd64"
+          file "dist/$APP_NAME-linux-amd64"
+
       - uses: actions/upload-artifact@v4
         with:
           name: better-cf-ip-c-linux-amd64
@@ -47,30 +68,46 @@ jobs:
   build-macos:
     name: Build ${{ matrix.target }}
     if: ${{ github.event_name == 'push' || inputs.target == 'macos-amd64' || inputs.target == 'macos-arm64' || inputs.target == 'all-supported' }}
-    runs-on: macos-14
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: macos-amd64
+            runner: macos-13
             arch: x86_64
+            minver: "10.13"
           - target: macos-arm64
+            runner: macos-14-arm64
             arch: arm64
+            minver: "11.0"
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Skip unmatched target
-        if: ${{ github.event_name != 'push' && inputs.target != matrix.target && inputs.target != 'all-supported' }}
-        run: echo "skip ${{ matrix.target }}"
+
       - name: Install dependencies
         if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
         run: |
-          brew install pkg-config openssl@3 curl
-          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
-      - name: Build
+          set -euo pipefail
+          brew install pkg-config openssl@3 curl || true
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Build ${{ matrix.target }}
         if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
         run: |
-          ./scripts/build.sh ${{ matrix.target }}
-          file dist/better-cf-ip-c-${{ matrix.target }}
+          set -euo pipefail
+          mkdir -p dist
+          clang -O2 -pipe -std=c11 \
+            -Wall -Wextra -Wno-unused-parameter \
+            -arch "${{ matrix.arch }}" \
+            -mmacosx-version-min="${{ matrix.minver }}" \
+            "$SRC_FILE" \
+            -o "dist/$APP_NAME-${{ matrix.target }}" \
+            $(pkg-config --cflags --libs libcurl openssl) \
+            -pthread
+          strip "dist/$APP_NAME-${{ matrix.target }}" 2>/dev/null || true
+          chmod +x "dist/$APP_NAME-${{ matrix.target }}"
+          file "dist/$APP_NAME-${{ matrix.target }}"
+
       - uses: actions/upload-artifact@v4
         if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
         with:
@@ -89,14 +126,17 @@ jobs:
           - target: windows-amd64
             msystem: MINGW64
             package_prefix: mingw-w64-x86_64
+            cc: gcc
           - target: windows-386
             msystem: MINGW32
             package_prefix: mingw-w64-i686
+            cc: gcc
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+
       - uses: msys2/setup-msys2@v2
         with:
           msystem: ${{ matrix.msystem }}
@@ -108,11 +148,26 @@ jobs:
             ${{ matrix.package_prefix }}-curl
             ${{ matrix.package_prefix }}-openssl
             ${{ matrix.package_prefix }}-winpthreads
-      - name: Build
+            file
+
+      - name: Build ${{ matrix.target }}
         if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
         run: |
-          ./scripts/build.sh ${{ matrix.target }}
-          file dist/better-cf-ip-c-${{ matrix.target }}.exe
+          set -euo pipefail
+          mkdir -p dist
+          gcc -O2 -pipe -std=c11 \
+            -DWINVER=0x0601 \
+            -D_WIN32_WINNT=0x0601 \
+            -finput-charset=UTF-8 \
+            -fexec-charset=UTF-8 \
+            -Wall -Wextra -Wno-unused-parameter \
+            "$SRC_FILE" \
+            -o "dist/$APP_NAME-${{ matrix.target }}.exe" \
+            $(pkg-config --cflags --libs libcurl openssl) \
+            -lws2_32 -lcrypt32 -lbcrypt -lwinpthread \
+            -static -s
+          file "dist/$APP_NAME-${{ matrix.target }}.exe"
+
       - uses: actions/upload-artifact@v4
         if: ${{ github.event_name == 'push' || inputs.target == matrix.target || inputs.target == 'all-supported' }}
         with:
@@ -127,23 +182,25 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
       - name: Assemble package
         run: |
           set -euo pipefail
           mkdir -p release package/bin
-          find artifacts -type f -maxdepth 3 -print0 | while IFS= read -r -d '' file; do
+          find artifacts -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
             name="$(basename "$file")"
             cp "$file" "release/$name"
             cp "$file" "package/bin/$name"
           done
-          cp better_cf_ip.c Makefile README.md package/
-          cp -r scripts package/
+          cp "$SRC_FILE" Makefile README.md package/
           [ -f locations.json ] && cp locations.json package/
           (cd package && zip -r ../release/better-cf-ip-c-release.zip .)
           (cd release && sha256sum * > sha256sums.txt)
+
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
