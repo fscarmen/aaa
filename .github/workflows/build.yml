@@ -303,50 +303,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p package/bin release_assets
+          mkdir -p package/bin release
           
-          # 遍历下载的所有构件
+          # 完美还原你最初的输出：遍历所有文件，同时输出裸文件到 release/ 下
           find dist -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
             name="$(basename "$file")"
-            
-            # 复制一份到全平台汇总包的临时 bin 目录
             cp "$file" "package/bin/$name"
-            
-            # 针对独立分发件分类进行压缩包打包，从而彻底在底层保留 Linux/macOS 的执行权限位
-            if [[ "$name" == *.exe ]]; then
-              # Windows 程序直接封进 zip 压缩包
-              zip -j "release_assets/${name%.exe}.zip" "$file"
-            elif [[ "$name" == *darwin* ]] || [[ "$name" == *macos* ]]; then
-              # macOS 赋予权限并打包为标准 zip 归档
-              chmod +x "$file"
-              zip -j "release_assets/${name}.zip" "$file"
-            else
-              # Linux 平台赋予权限并打包为体积更小的开源首选 tar.gz 格式
-              chmod +x "$file"
-              tar -czf "release_assets/${name}.tar.gz" -C "$(dirname "$file")" "$name"
-            fi
+            cp "$file" "release/$name"
+            case "$name" in
+              *.exe) ;;
+              *) chmod +x "package/bin/$name" "release/$name" ;;
+            esac
           done
           
-          # 针对大打包目录里所有非 Windows 的二进制赋权
-          find package/bin -type f ! -name "*.exe" -print0 | xargs -0 chmod +x || true
-          
-          # 补全说明文件及相关附属资源文件到全打包中
           cp cfnat.c README.md package/
           [ -f ips-v4.txt ] && cp ips-v4.txt package/
           [ -f ips-v6.txt ] && cp ips-v6.txt package/
           [ -f locations.json ] && cp locations.json package/
           
-          # 生成最终的 cfnat-release.zip 全合一包
-          (cd package && zip -r ../release_assets/cfnat-release.zip .)
-          
+          # 依然为你打包一份全平台汇总压缩包
+          (cd package && zip -r ../release/cfnat-release.zip .)
+          ls -lh package
+          ls -lh release
       - name: Create checksums
         shell: bash
         run: |
           set -euo pipefail
-          cd release_assets
+          cd release
           sha256sum * > sha256sums.txt
-          
       - name: Upload GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: release_assets/*
+          files: release/*
