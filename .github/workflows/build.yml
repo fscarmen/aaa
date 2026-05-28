@@ -126,18 +126,13 @@ jobs:
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
             -pthread -s
 
-          chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-
-          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.tar.gz
+          path: dist/${{ matrix.artifact }}
           if-no-files-found: error
 
 
@@ -247,18 +242,13 @@ jobs:
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
             -pthread -static -s
 
-          chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-
-          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.tar.gz
+          path: dist/${{ matrix.artifact }}
           if-no-files-found: error
 
 
@@ -296,7 +286,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ${{ matrix.packages }} \
             file \
-            zip \
             ca-certificates
 
       - name: Build Windows Win7+
@@ -320,18 +309,11 @@ jobs:
 
           file "dist/${{ matrix.artifact }}"
 
-          (
-            cd dist
-            zip -9 "${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
-          )
-
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.zip
+          path: dist/${{ matrix.artifact }}
           if-no-files-found: error
 
 
@@ -381,18 +363,13 @@ jobs:
             -pthread
 
           strip "dist/${{ matrix.artifact }}" || true
-          chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-
-          tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            dist/${{ matrix.artifact }}
-            dist/${{ matrix.artifact }}.tar.gz
+          path: dist/${{ matrix.artifact }}
           if-no-files-found: error
 
 
@@ -418,50 +395,17 @@ jobs:
         with:
           path: dist
 
-      - name: Assemble release bundle
+      - name: Assemble release files
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p package/bin release
+          mkdir -p release
 
           find dist -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
             name="$(basename "$file")"
-
-            case "$name" in
-              *.tar.gz|*.zip)
-                cp "$file" "release/$name"
-                continue
-                ;;
-            esac
-
-            cp "$file" "package/bin/$name"
             cp "$file" "release/$name"
-
-            case "$name" in
-              *.exe)
-                ;;
-              *)
-                chmod +x "package/bin/$name" "release/$name"
-                ;;
-            esac
           done
-
-          cp cfnat.c README.md package/
-
-          [ -f ips-v4.txt ] && cp ips-v4.txt package/
-          [ -f ips-v6.txt ] && cp ips-v6.txt package/
-          [ -f locations.json ] && cp locations.json package/
-
-          (
-            cd package
-            zip -r ../release/cfnat-release.zip .
-          )
-
-          tar -C package -czf release/cfnat-release.tar.gz .
-
-          echo "Package contents:"
-          find package -maxdepth 3 -type f -exec ls -lh {} \;
 
           echo "Release contents:"
           find release -maxdepth 1 -type f -exec ls -lh {} \;
