@@ -91,7 +91,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat.c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ github.token }}
@@ -113,7 +113,7 @@ jobs:
             -pthread -s
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -162,7 +162,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat.c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ github.token }}
@@ -188,7 +188,7 @@ jobs:
             -pthread -static -s
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -212,7 +212,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat.c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ github.token }}
@@ -235,7 +235,7 @@ jobs:
             "$SOURCE_FILE" -o "dist/${{ matrix.artifact }}" \
             -lws2_32 -ldnsapi -lwininet -lwinpthread -static -s
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -259,7 +259,7 @@ jobs:
     env:
       SOURCE_FILE: cfnat.c
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ github.token }}
@@ -278,7 +278,7 @@ jobs:
           strip "dist/${{ matrix.artifact }}" || true
           chmod +x "dist/${{ matrix.artifact }}"
           file "dist/${{ matrix.artifact }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
@@ -291,42 +291,62 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           token: ${{ github.token }}
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Assemble release bundle
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p package/bin release
+          mkdir -p package/bin release_assets
+          
+          # 遍历下载的所有构件
           find dist -maxdepth 3 -type f -print0 | while IFS= read -r -d '' file; do
             name="$(basename "$file")"
+            
+            # 复制一份到全平台汇总包的临时 bin 目录
             cp "$file" "package/bin/$name"
-            cp "$file" "release/$name"
-            case "$name" in
-              *.exe) ;;
-              *) chmod +x "package/bin/$name" "release/$name" ;;
-            esac
+            
+            # 针对独立分发件分类进行压缩包打包，从而彻底在底层保留 Linux/macOS 的执行权限位
+            if [[ "$name" == *.exe ]]; then
+              # Windows 程序直接封进 zip 压缩包
+              zip -j "release_assets/${name%.exe}.zip" "$file"
+            elif [[ "$name" == *darwin* ]] || [[ "$name" == *macos* ]]; then
+              # macOS 赋予权限并打包为标准 zip 归档
+              chmod +x "$file"
+              zip -j "release_assets/${name}.zip" "$file"
+            else
+              # Linux 平台赋予权限并打包为体积更小的开源首选 tar.gz 格式
+              chmod +x "$file"
+              tar -czf "release_assets/${name}.tar.gz" -C "$(dirname "$file")" "$name"
+            fi
           done
+          
+          # 针对大打包目录里所有非 Windows 的二进制赋权
+          find package/bin -type f ! -name "*.exe" -print0 | xargs -0 chmod +x || true
+          
+          # 补全说明文件及相关附属资源文件到全打包中
           cp cfnat.c README.md package/
-          if [ -f ips-v4.txt ]; then cp ips-v4.txt package/; fi
-          if [ -f ips-v6.txt ]; then cp ips-v6.txt package/; fi
-          if [ -f locations.json ]; then cp locations.json package/; fi
-          (cd package && zip -r ../release/cfnat-release.zip .)
-          ls -lh package
-          ls -lh release
+          [ -f ips-v4.txt ] && cp ips-v4.txt package/
+          [ -f ips-v6.txt ] && cp ips-v6.txt package/
+          [ -f locations.json ] && cp locations.json package/
+          
+          # 生成最终的 cfnat-release.zip 全合一包
+          (cd package && zip -r ../release_assets/cfnat-release.zip .)
+          
       - name: Create checksums
         shell: bash
         run: |
           set -euo pipefail
-          cd release
+          cd release_assets
           sha256sum * > sha256sums.txt
+          
       - name: Upload GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: release/*
+          files: release_assets/*
