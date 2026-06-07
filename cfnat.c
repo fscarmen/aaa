@@ -2024,7 +2024,12 @@ static int parse_addr(const char *addr, char *host, size_t hostsz, int *port) {
         return *port > 0 ? 0 : -1;
     }
     const char *colon = strrchr(addr, ':');
-    if (!colon) return -1;
+    if (!colon) {
+        // 只有端口号的情况，例如 "1234"
+        snprintf(host, hostsz, "0.0.0.0");
+        *port = atoi(addr);
+        return *port > 0 ? 0 : -1;
+    }
     size_t n = (size_t)(colon - addr);
     if (n >= hostsz) n = hostsz - 1;
     memcpy(host, addr, n);
@@ -2039,46 +2044,61 @@ static socket_t listen_tcp(const char *addr) {
     int port = 0;
     if (parse_addr(addr, host, sizeof(host), &port) != 0) return INVALID_SOCKET;
     int yes = 1;
+    
     if (strchr(host, ':')) {
         socket_t fd = socket(AF_INET6, SOCK_STREAM, 0);
         if (cfnat_socket_invalid(fd)) return INVALID_SOCKET;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#ifdef SO_REUSEPORT
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+#endif
         struct sockaddr_in6 sa6;
         memset(&sa6, 0, sizeof(sa6));
         sa6.sin6_family = AF_INET6;
         sa6.sin6_port = htons((uint16_t)port);
         if (inet_pton(AF_INET6, host, &sa6.sin6_addr) != 1) {
             close(fd);
-            return -1;
+            return INVALID_SOCKET;
         }
         if (bind(fd, (struct sockaddr *)&sa6, sizeof(sa6)) != 0) {
+            int err = errno;
             close(fd);
-            return -1;
+            errno = err;
+            return INVALID_SOCKET;
         }
         if (listen(fd, 1024) != 0) {
+            int err = errno;
             close(fd);
-            return -1;
+            errno = err;
+            return INVALID_SOCKET;
         }
         return fd;
     }
     socket_t fd = socket(AF_INET, SOCK_STREAM, 0);
     if (cfnat_socket_invalid(fd)) return INVALID_SOCKET;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#ifdef SO_REUSEPORT
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes));
+#endif
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)port);
     if (inet_pton(AF_INET, host, &sa.sin_addr) != 1) {
         close(fd);
-        return -1;
+        return INVALID_SOCKET;
     }
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        int err = errno;
         close(fd);
-        return -1;
+        errno = err;
+        return INVALID_SOCKET;
     }
     if (listen(fd, 1024) != 0) {
+        int err = errno;
         close(fd);
-        return -1;
+        errno = err;
+        return INVALID_SOCKET;
     }
     return fd;
 }
