@@ -102,7 +102,7 @@ typedef struct {
     char baidu_domain[MAX_DOMAIN_LEN], baidu_scan_target[MAX_ADDR_LEN];
     char direct_listen[MAX_ADDR_LEN], baidu_listen[MAX_ADDR_LEN];
     int code, delay_ms, ipnum, ips_type, num, port, http_port, random_mode, task, health_log;
-    int baidu_port, baidu_ipnum;
+    int use_baidu_proxy, baidu_port, baidu_ipnum;
     LogLevel log_level;
 } Config;
 
@@ -483,6 +483,7 @@ static void cfg_defaults(Config *c) {
     c->random_mode = 1;
     c->task = 100;
     c->health_log = 60;
+    c->use_baidu_proxy = 0;
     c->baidu_port = DEFAULT_BAIDU_PORT;
     c->baidu_ipnum = DEFAULT_BAIDU_IPNUM;
     c->log_level = LOG_INFO;
@@ -533,6 +534,7 @@ static void parse_args(Config *c, int argc, char **argv) {
     if (c->task > 512) c->task = 512;
     if (c->baidu_port <= 0) c->baidu_port = 443;
     if (c->baidu_ipnum <= 0) c->baidu_ipnum = 12;
+    if (c->baidu_listen[0]) c->use_baidu_proxy = 1;
 }
 
 static int file_exists(const char *path) {
@@ -1289,13 +1291,22 @@ static int cmp_result(const void *a, const void *b) {
 
 static int health_check_ip(const char *ip, BaiduProxyPool *proxy_pool);
 static int set_current_candidate(size_t idx);
+static int carrier_health_check_ip(CarrierRuntime *rt, const char *ip);
+static int carrier_set_current_candidate(CarrierRuntime *rt, size_t idx);
+static int carrier_try_use_candidate_cache(CarrierRuntime *rt);
 
 #define CACHE_REFRESH_INTERVAL_SECONDS 3600L
 #define CACHE_QUICK_CHECK_COUNT 5
 
-static const char *candidate_cache_file(void) {
-    if (g_cfg.ips_type == 6) return "cfnat-cache-v6.txt";
-    return "cfnat-cache-v4.txt";
+static const char *candidate_cache_file(const char *mode) {
+    if (mode && strcmp(mode, "baidu") == 0) {
+        return g_cfg.ips_type == 6 ? "baidu-cache-v6.txt" : "baidu-cache-v4.txt";
+    }
+    if (mode && strcmp(mode, "mixed") == 0) {
+        return g_cfg.ips_type == 6 ? "mixed-cache-v6.txt" : "mixed-cache-v4.txt";
+    }
+    // default: direct mode
+    return g_cfg.ips_type == 6 ? "direct-cache-v6.txt" : "direct-cache-v4.txt";
 }
 
 static void save_candidate_cache(const char *path, const Result *items, size_t len) {
@@ -1369,7 +1380,7 @@ static ResultList load_candidate_cache(const char *path) {
 static int try_use_candidate_cache(BaiduProxyPool *proxy_pool, ResultList *out) {
     if (!out) return 0;
     memset(out, 0, sizeof(*out));
-    const char *path = candidate_cache_file();
+    const char *path = candidate_cache_file("direct");
     ResultList cached = load_candidate_cache(path);
     if (cached.len == 0) {
         pthread_mutex_destroy(&cached.mu);
@@ -1394,6 +1405,40 @@ static int try_use_candidate_cache(BaiduProxyPool *proxy_pool, ResultList *out) 
     free(cached.items);
     pthread_mutex_destroy(&cached.mu);
     return 0;
+}
+
+static int carrier_try_use_candidate_cache(CarrierRuntime *rt) {
+    if (!rt) return 0;
+    const char *path = candidate_cache_file(rt->spec.mode);
+    ResultList cached = load_candidate_cache(path);
+    if (cached.len == 0) {
+        pthread_mutex_destroy(&cached.mu);
+        return 0;
+    }
+
+    size_t check_count = cached.len < CACHE_QUICK_CHECK_COUNT ? cached.len : CACHE_QUICK_CHECK_COUNT;
+    size_t first_good = (size_t)-1;
+    for (size_t i = 0; i < check_count; i++) {
+        if (carrier_health_check_ip(rt, cached.items[i].ip)) {
+            first_good = i;
+            break;
+        }
+    }
+    if (first_good == (size_t)-1) {
+        warn_msg("%s 候选缓存健康检查未命中，将执行完整扫描", carrier_display_name(rt->spec.mode));
+        free(cached.items);
+        pthread_mutex_destroy(&cached.mu);
+        return 0;
+    }
+
+    // 缓存命中，将结果交给 CarrierRuntime
+    rt->candidates.items = cached.items;
+    rt->candidates.len = cached.len;
+    carrier_set_current_candidate(rt, first_good);
+    log_msg("%s 命中候选缓存，快速启动使用 IP: %s", carrier_display_name(rt->spec.mode), cached.items[first_good].ip);
+    // 注意：pthread_mutex_init 已在外面初始化，此处不重复初始化
+    // cached.mu 不再需要，但指向的 items 已被 rt 接管，不要销毁
+    return 1;
 }
 
 static void explain_selected_result(const Result *best) {
@@ -1544,7 +1589,7 @@ static int rescan_and_select_ip(BaiduProxyPool *proxy_pool) {
         }
         g_candidates = results.items;
         g_candidate_count = results.len;
-        save_candidate_cache(candidate_cache_file(), results.items, results.len);
+        save_candidate_cache(candidate_cache_file("direct"), results.items, results.len);
         log_msg("重新扫描得到 %zu 个候选 IP", g_candidate_count);
         if (select_valid_ip(proxy_pool)) return 1;
         free(results.items);
@@ -1635,7 +1680,7 @@ typedef struct {
 
 static void replace_candidates_from_refresh(ResultList *results, BaiduProxyPool *proxy_pool) {
     if (!results || results->len == 0) return;
-    save_candidate_cache(candidate_cache_file(), results->items, results->len);
+    save_candidate_cache(candidate_cache_file("direct"), results->items, results->len);
     if (!health_check_ip(results->items[0].ip, proxy_pool)) {
         warn_msg("后台刷新得到候选，但首选 IP 健康检查失败，暂不替换当前候选池");
         free(results->items);
@@ -2238,6 +2283,22 @@ int main(int argc, char **argv) {
             pthread_mutex_init(&rt->candidates.mu, NULL);
 
             ResultList carrier_results = {0};
+            // 先尝试读取候选缓存
+            if (carrier_try_use_candidate_cache(rt)) {
+                started_count++;
+                rt->listen_fd = listen_tcp(rt->spec.addr);
+                if (cfnat_socket_invalid(rt->listen_fd)) {
+                    log_msg("无法监听 %s(%s): %s", carrier_display_name(rt->spec.mode), rt->spec.addr, strerror(errno));
+                    free(rt->candidates.items);
+                    rt->candidates.items = NULL;
+                    rt->candidates.len = 0;
+                    continue;
+                }
+                log_msg("%s 正在监听 %s，TLS目标端口：%d，非TLS目标端口：%d，连接尝试次数：%d，有效延迟：%d ms，日志：%s", carrier_display_name(rt->spec.mode), rt->spec.addr, g_cfg.port, g_cfg.http_port, g_cfg.num, g_cfg.delay_ms, g_cfg.log_name);
+                create_small_thread(&rt->health_tid, carrier_health_thread, rt);
+                create_small_thread(&rt->accept_tid, carrier_accept_thread, rt);
+                continue;
+            }
             if (rt->spec.use_baidu_proxy == 2) {
                 // 混合模式：同时用直连和百度扫描，合并结果
                 rt->proxy_pool = calloc(1, sizeof(BaiduProxyPool));
@@ -2312,6 +2373,8 @@ int main(int argc, char **argv) {
             }
             rt->candidates.items = carrier_results.items;
             rt->candidates.len = carrier_results.len;
+            // 扫描完成后保存缓存，供下次启动加速
+            save_candidate_cache(candidate_cache_file(rt->spec.mode), carrier_results.items, carrier_results.len);
             if (!carrier_select_valid_ip(rt)) {
                 warn_msg("%s 候选 IP 健康检查全部失败", carrier_display_name(rt->spec.mode));
                 free(rt->candidates.items);
@@ -2387,13 +2450,23 @@ int main(int argc, char **argv) {
         return 0;
     }
     long start = now_ms();
-    ResultList results = scan_ips(&ips, &g_cfg, NULL);
+    // 先尝试读取候选缓存，如果命中且健康检查通过则跳过完整扫描
+    ResultList results = {0};
+    int cache_hit = try_use_candidate_cache(NULL, &results);
+    if (!cache_hit) {
+        results = scan_ips(&ips, &g_cfg, NULL);
+        if (results.len > 0) {
+            save_candidate_cache(candidate_cache_file("direct"), results.items, results.len);
+        }
+    }
     strlist_free(&ips);
     free(carrier_specs);
-    printf("候选池统计\n");
-    printf("候选总数: %zu\n", results.len);
-    printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
-    for (size_t i = 0; i < results.len; i++) printf("%s | %s | %s | %s | %d ms | %d%% | %d/%d\n", results.items[i].ip, results.items[i].data_center, results.items[i].region, results.items[i].city, results.items[i].latency_ms, results.items[i].loss_rate, results.items[i].success_count, results.items[i].probe_count);
+    if (!cache_hit) {
+        printf("候选池统计\n");
+        printf("候选总数: %zu\n", results.len);
+        printf("IP 地址 | 数据中心 | 地区 | 城市 | 延迟 | 丢包 | 探测成功\n");
+        for (size_t i = 0; i < results.len; i++) printf("%s | %s | %s | %s | %d ms | %d%% | %d/%d\n", results.items[i].ip, results.items[i].data_center, results.items[i].region, results.items[i].city, results.items[i].latency_ms, results.items[i].loss_rate, results.items[i].success_count, results.items[i].probe_count);
+    }
     printf("成功提取 %zu 个有效IP，耗时 %ld秒\n", results.len, (now_ms() - start) / 1000);
     if (results.len > 0) {
         printf("评分最优 IP: %s\n", results.items[0].ip);
