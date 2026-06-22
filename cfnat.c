@@ -206,12 +206,6 @@ typedef struct {
 static Config g_cfg;
 static Location *g_locations = NULL;
 static size_t g_location_count = 0;
-static Result *g_candidates = NULL;
-static size_t g_candidate_count = 0, g_current_index = 0;
-
-static char g_current_ip[MAX_IP_LEN] = {0};
-
-static pthread_mutex_t g_ip_mu = PTHREAD_MUTEX_INITIALIZER;
 static atomic_int g_running = 1;
 static atomic_int g_active_connections = 0;
 static socket_t g_listen_fd = INVALID_SOCKET;
@@ -1642,7 +1636,6 @@ static int cmp_result(const void *a, const void *b) {
 
 
 static int health_check_ip(const char *ip, BaiduProxyPool *proxy_pool);
-static int set_current_candidate(size_t idx);
 static int carrier_health_check_ip(CarrierRuntime *rt, const char *ip);
 static int carrier_set_current_candidate(CarrierRuntime *rt, size_t idx);
 static int carrier_try_use_candidate_cache(CarrierRuntime *rt);
@@ -1739,12 +1732,9 @@ static int try_use_candidate_cache(BaiduProxyPool *proxy_pool, ResultList *out) 
         return 0;
     }
 
-    g_candidates = cached.items;
-    g_candidate_count = cached.len;
     size_t check_count = cached.len < CACHE_QUICK_CHECK_COUNT ? cached.len : CACHE_QUICK_CHECK_COUNT;
     for (size_t i = 0; i < check_count; i++) {
         if (health_check_ip(cached.items[i].ip, proxy_pool)) {
-            set_current_candidate(i);
             log_msg("命中候选缓存，快速启动使用 IP: %s，后台将继续刷新候选池", cached.items[i].ip);
             *out = cached;
             return 1;
@@ -1752,8 +1742,6 @@ static int try_use_candidate_cache(BaiduProxyPool *proxy_pool, ResultList *out) 
     }
 
     warn_msg("候选缓存健康检查未命中，将执行完整扫描");
-    g_candidates = NULL;
-    g_candidate_count = 0;
     free(cached.items);
     pthread_mutex_destroy(&cached.mu);
     return 0;
@@ -1911,155 +1899,71 @@ static int health_check_ip(const char *ip, BaiduProxyPool *proxy_pool) {
     return 0;
 }
 
-static int set_current_candidate(size_t idx) {
-    if (idx >= g_candidate_count) return 0;
-    pthread_mutex_lock(&g_ip_mu);
-    snprintf(g_current_ip, sizeof(g_current_ip), "%s", g_candidates[idx].ip);
-    g_current_index = idx;
-    pthread_mutex_unlock(&g_ip_mu);
-    return 1;
-}
-
-static int select_valid_ip(BaiduProxyPool *proxy_pool) {
-    for (size_t i = 0; i < g_candidate_count; i++) {
-        if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
-            set_current_candidate(i);
-            log_msg("可用 IP: %s (健康检查端口:%d)", g_candidates[i].ip, g_cfg.port);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int switch_next_ip(BaiduProxyPool *proxy_pool) {
-    pthread_mutex_lock(&g_ip_mu);
-    size_t start = g_current_index + 1;
-    pthread_mutex_unlock(&g_ip_mu);
-    for (size_t i = start; i < g_candidate_count; i++) {
-        if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
-            set_current_candidate(i);
-            log_msg("切换到下一个最优 IP: %s 候选索引: %zu", g_candidates[i].ip, i);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int choose_ip_for_connection(char *out, size_t sz, BaiduProxyPool *proxy_pool) {
-    if (!out || sz == 0) return 0;
-    out[0] = '\0';
-    if (g_candidate_count == 0) return 0;
-
-    /* P0-1: 如果当前 IP 非空，直接使用（简化版缓存，无 cache_valid 标记） */
-    pthread_mutex_lock(&g_ip_mu);
-    int has_ip = g_current_ip[0] != 0;
-    pthread_mutex_unlock(&g_ip_mu);
-    if (has_ip) {
-        pthread_mutex_lock(&g_ip_mu);
-        snprintf(out, sz, "%s", g_current_ip);
-        pthread_mutex_unlock(&g_ip_mu);
-        return 1;
-    }
-
-    for (size_t i = 0; i < g_candidate_count; i++) {
-        if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
-            snprintf(out, sz, "%s", g_candidates[i].ip);
-            set_current_candidate(i);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int rescan_and_select_ip(BaiduProxyPool *proxy_pool) {
-    if (g_candidates) {
-        free(g_candidates);
-        g_candidates = NULL;
-    }
-    g_candidate_count = 0;
-    pthread_mutex_lock(&g_ip_mu);
-    g_current_ip[0] = '\0';
-    g_current_index = 0;
-    pthread_mutex_unlock(&g_ip_mu);
-    const char *ipfile = g_cfg.ips_type == 6 ? "ips-v6.txt" : "ips-v4.txt";
-    for (;;) {
-        if (!atomic_load(&g_running)) return 0;
-        StringList ips = load_ip_list(ipfile, g_cfg.random_mode);
-        if (ips.len == 0) {
-            warn_msg("没有可扫描的 IP，3 秒后重试");
-            if (sleep_interruptible_ms(3000) != 0) return 0;
-            continue;
-        }
-        ResultList results = scan_ips(&ips, &g_cfg, proxy_pool);
-        strlist_free(&ips);
-        if (results.len == 0) {
-            warn_msg("重新扫描后仍未发现有效IP，3 秒后重试");
-            if (sleep_interruptible_ms(3000) != 0) return 0;
-            continue;
-        }
-        g_candidates = results.items;
-        g_candidate_count = results.len;
-        save_candidate_cache(candidate_cache_file("direct"), results.items, results.len);
-        log_msg("重新扫描得到 %zu 个候选 IP", g_candidate_count);
-        if (select_valid_ip(proxy_pool)) return 1;
-        free(results.items);
-        g_candidates = NULL;
-        g_candidate_count = 0;
-        warn_msg("重新扫描得到的候选 IP 健康检查均失败，3 秒后重试");
-        if (sleep_interruptible_ms(3000) != 0) return 0;
-    }
-}
-
-static void get_current_ip(char *out, size_t sz) {
-    pthread_mutex_lock(&g_ip_mu);
-    snprintf(out, sz, "%s", g_current_ip);
-    pthread_mutex_unlock(&g_ip_mu);
-}
-
-static void *health_thread(void *arg) {
-    BaiduProxyPool *proxy_pool = (BaiduProxyPool *)arg;
-    int fail = 0;
-    long last = 0;
-    while (atomic_load(&g_running)) {
-        if (sleep_interruptible_ms(10000) != 0) break;
-        char ip[MAX_IP_LEN];
-        get_current_ip(ip, sizeof(ip));
-        if (!ip[0] || !health_check_ip(ip, proxy_pool)) {
-            fail++;
-            log_msg("状态检查失败 (%d/2): 当前 IP %s 暂不可用", fail, ip[0] ? ip : "为空");
-        } else {
-            fail = 0;
-            long n = now_ms();
-            if (g_cfg.health_log > 0 && n - last >= g_cfg.health_log * 1000L) {
-                log_msg("状态检查成功: 当前 IP %s 可用", ip);
-                last = n;
-            }
-        }
-        if (fail >= 2) {
-            log_msg("连续两次状态检查失败，切换到下一个 IP");
-            if (!switch_next_ip(proxy_pool)) {
-                log_msg("没有更多可用 IP，开始重新扫描");
-                if (!rescan_and_select_ip(proxy_pool)) {
-                    atomic_store(&g_running, 0);
-                    return NULL;
-                }
-            }
-            fail = 0;
-        }
-    }
-    return NULL;
-}
 
 static void close_pair(socket_t a, socket_t b) {
     shutdown(a, SHUT_RDWR);
     shutdown(b, SHUT_RDWR);
 }
 
+/* P1-2: 带超时的 recv，超时返回 -1，errno = ETIMEDOUT */
+static ssize_t recv_timeout(socket_t fd, void *buf, size_t len, int timeout_ms) {
+    if (timeout_ms <= 0) return recv(fd, buf, len, 0);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    int rc = select((int)(fd + 1), &rfds, NULL, NULL, &tv);
+    if (rc <= 0) {
+        if (rc == 0) errno = ETIMEDOUT;
+        return -1;
+    }
+    return recv(fd, buf, len, 0);
+}
+
+#ifdef __linux__
+/* P1-4: Linux 零拷贝转发，使用 splice() 避免用户态内存拷贝 */
+static void *pipe_worker(void *arg) {
+    PipeCtx *pc = (PipeCtx *)arg;
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        /* pipe 创建失败，回退到普通 recv/send */
+        char buf[COPY_BUF_SIZE];
+        while (1) {
+            ssize_t n = recv_timeout(pc->from, buf, sizeof(buf), 300000);
+            if (n <= 0) break;
+            char *p = buf;
+            ssize_t left = n;
+            while (left > 0) {
+                ssize_t w = send(pc->to, p, (size_t)left, 0);
+                if (w <= 0) goto done;
+                p += w;
+                left -= w;
+            }
+        }
+        goto done;
+    }
+    while (1) {
+        ssize_t n = splice(pc->from, NULL, pipefd[1], NULL, 65536, SPLICE_F_MOVE);
+        if (n <= 0) break;
+        while (n > 0) {
+            ssize_t w = splice(pipefd[0], NULL, pc->to, NULL, (size_t)n, SPLICE_F_MOVE);
+            if (w <= 0) goto done;
+            n -= w;
+        }
+    }
+    close(pipefd[0]);
+    close(pipefd[1]);
+    done : close_pair(pc->from, pc->to);
+    return NULL;
+}
+#else
+/* 非 Linux 平台使用普通 recv/send 转发 */
 static void *pipe_worker(void *arg) {
     PipeCtx *pc = (PipeCtx *)arg;
     char buf[COPY_BUF_SIZE];
     while (1) {
-        ssize_t n = recv(pc->from, buf, sizeof(buf), 0);
+        /* P1-2: recv 带 300 秒超时，防止空闲连接永久阻塞 */
+        ssize_t n = recv_timeout(pc->from, buf, sizeof(buf), 300000);
         if (n <= 0) break;
         char *p = buf;
         ssize_t left = n;
@@ -2073,6 +1977,7 @@ static void *pipe_worker(void *arg) {
     done : close_pair(pc->from, pc->to);
     return NULL;
 }
+#endif
 
 static int create_small_thread(pthread_t *tid, void *(*fn)(void *), void *arg) {
     pthread_attr_t attr;
@@ -2084,61 +1989,6 @@ static int create_small_thread(pthread_t *tid, void *(*fn)(void *), void *arg) {
 }
 
 
-typedef struct {
-    BaiduProxyPool *proxy_pool;
-} RefreshCtx;
-
-static void replace_candidates_from_refresh(ResultList *results, BaiduProxyPool *proxy_pool) {
-    if (!results || results->len == 0) return;
-    save_candidate_cache(candidate_cache_file("direct"), results->items, results->len);
-    if (!health_check_ip(results->items[0].ip, proxy_pool)) {
-        warn_msg("后台刷新得到候选，但首选 IP 健康检查失败，暂不替换当前候选池");
-        free(results->items);
-        results->items = NULL;
-        results->len = 0;
-        return;
-    }
-
-    Result *old_items = g_candidates;
-    (void)old_items;
-    g_candidates = results->items;
-    g_candidate_count = results->len;
-    set_current_candidate(0);
-    log_msg("后台刷新完成，当前最优 IP 已更新为 %s", results->items[0].ip);
-    results->items = NULL;
-    results->len = 0;
-}
-
-static void *refresh_thread(void *arg) {
-    RefreshCtx *ctx = (RefreshCtx *)arg;
-    int first = 1;
-    while (atomic_load(&g_running)) {
-        if (!first) {
-            if (sleep_interruptible_ms(CACHE_REFRESH_INTERVAL_SECONDS * 1000) != 0) break;
-        }
-        first = 0;
-        if (!atomic_load(&g_running)) break;
-
-        const char *ipfile = g_cfg.ips_type == 6 ? "ips-v6.txt" : "ips-v4.txt";
-        log_msg("后台开始刷新候选 IP，服务保持监听中");
-        StringList ips = load_ip_list(ipfile, g_cfg.random_mode);
-        if (ips.len == 0) {
-            warn_msg("后台刷新未读取到可扫描 IP");
-            continue;
-        }
-        ResultList results = scan_ips(&ips, &g_cfg, ctx ? ctx->proxy_pool : NULL);
-        strlist_free(&ips);
-        if (results.len == 0) {
-            warn_msg("后台刷新未发现有效候选 IP，继续使用当前候选池");
-            free(results.items);
-            pthread_mutex_destroy(&results.mu);
-            continue;
-        }
-        replace_candidates_from_refresh(&results, ctx ? ctx->proxy_pool : NULL);
-        pthread_mutex_destroy(&results.mu);
-    }
-    return NULL;
-}
 
 static int relay_bidirectional(socket_t c, socket_t u) {
     pthread_t t1, t2;
@@ -2161,7 +2011,8 @@ static void *connection_thread(void *arg) {
     ConnCtx *cc = (ConnCtx *)arg;
     socket_t client = cc->client_fd;
     unsigned char first = 0;
-    ssize_t n = recv(client, (char *) & first, 1, 0);
+    /* P1-2: 首字节 recv 带 60 秒超时，防止空闲连接占用线程 */
+    ssize_t n = recv_timeout(client, (char *) & first, 1, 60000);
     if (n <= 0) goto out;
     int is_tls = first == 0x16;
     int target_port = is_tls ? cc->tls_port : cc->http_port;
