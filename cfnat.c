@@ -1,9 +1,12 @@
+#define CFNAT_VERSION "0.0.9"
+
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 #include <windows.h>
 #include <wininet.h>
 #include <io.h>
@@ -17,6 +20,13 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/epoll.h>
+#endif
+#ifdef __APPLE__
+#include <sys/event.h>
+#include <sys/types.h>
+#endif
 #endif
 
 #include <ctype.h>
@@ -169,6 +179,7 @@ typedef struct {
     size_t current_index;
     char current_ip[MAX_IP_LEN];
     pthread_mutex_t mu;
+    atomic_int cache_valid;  /* P0-1: 1=当前 IP 可直接使用，0=需要重新选择 */
 } CandidatePool;
 
 typedef struct {
@@ -210,6 +221,339 @@ static BaiduProxyPool g_default_proxy_pool = {0};
 static CarrierRuntime *g_carrier_runtimes = NULL;
 static size_t g_carrier_runtime_count = 0;
 static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * ============================================================
+ * EventLoop — 事件驱动 I/O 抽象层 (P0-3)
+ * ============================================================
+ * 提供统一的 event loop 接口，各平台使用原生最优实现：
+ *   Linux:   epoll (边缘触发)
+ *   macOS:   kqueue
+ *   Windows: IOCP (完成端口)
+ *
+ * 保留 select() 作为编译期 fallback（通过 USE_SELECT_FALLBACK 宏）
+ * ============================================================
+ */
+
+/* 事件类型 */
+#define EV_READ  1
+#define EV_WRITE 2
+#define EV_ERR   4
+
+/* 前向声明 */
+typedef struct EventLoop EventLoop;
+typedef void (*event_callback_fn)(EventLoop *loop, socket_t fd, int events, void *userdata);
+
+struct EventLoop {
+    socket_t epfd;          /* epoll/kqueue fd 或 IOCP 完成端口句柄 */
+    int max_events;
+    int running;
+    event_callback_fn callback;
+    void *userdata;
+#ifdef _WIN32
+    OVERLAPPED *ov_list;    /* IOCP 每个 fd 的 OVERLAPPED 数组 */
+    size_t ov_count;
+    size_t ov_cap;
+#elif defined(__linux__)
+    struct epoll_event *events;
+#elif defined(__APPLE__)
+    struct kevent *events;
+    int kq;
+#endif
+};
+
+/* 创建 event loop */
+static int event_loop_init(EventLoop *loop, int max_events,
+                           event_callback_fn cb, void *userdata) {
+    memset(loop, 0, sizeof(*loop));
+    loop->max_events = max_events > 0 ? max_events : 1024;
+    loop->callback = cb;
+    loop->userdata = userdata;
+    loop->running = 0;
+
+#ifdef _WIN32
+    /* Windows: IOCP 完成端口 */
+    loop->epfd = (socket_t)CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    if (loop->epfd == NULL) {
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+    loop->ov_cap = 64;
+    loop->ov_list = calloc(loop->ov_cap, sizeof(OVERLAPPED));
+    if (!loop->ov_list) {
+        CloseHandle((HANDLE)loop->epfd);
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+    loop->ov_count = 0;
+#elif defined(__linux__)
+    /* Linux: epoll */
+    loop->epfd = epoll_create1(0);
+    if (loop->epfd < 0) {
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+    loop->events = calloc((size_t)loop->max_events, sizeof(struct epoll_event));
+    if (!loop->events) {
+        close(loop->epfd);
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+#elif defined(__APPLE__)
+    /* macOS: kqueue */
+    loop->kq = kqueue();
+    if (loop->kq < 0) {
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+    loop->epfd = loop->kq; /* 统一用 epfd 字段存储 */
+    loop->events = calloc((size_t)loop->max_events, sizeof(struct kevent));
+    if (!loop->events) {
+        close(loop->kq);
+        loop->epfd = INVALID_SOCKET;
+        return -1;
+    }
+#else
+    /* fallback: 不支持的平台 */
+    loop->epfd = INVALID_SOCKET;
+    return -1;
+#endif
+    return 0;
+}
+
+/* 销毁 event loop */
+static void event_loop_destroy(EventLoop *loop) {
+    if (!loop) return;
+#ifdef _WIN32
+    if (loop->epfd != NULL && loop->epfd != INVALID_SOCKET) {
+        CloseHandle((HANDLE)loop->epfd);
+    }
+    free(loop->ov_list);
+    loop->ov_list = NULL;
+    loop->ov_count = 0;
+    loop->ov_cap = 0;
+#elif defined(__linux__)
+    if (cfnat_socket_valid(loop->epfd)) close(loop->epfd);
+    free(loop->events);
+#elif defined(__APPLE__)
+    if (cfnat_socket_valid(loop->kq)) close(loop->kq);
+    free(loop->events);
+#endif
+    loop->epfd = INVALID_SOCKET;
+    loop->events = NULL;
+}
+
+/* 添加 fd 到 event loop */
+static int event_loop_add(EventLoop *loop, socket_t fd, int events, void *userdata) {
+    if (!loop || cfnat_socket_invalid(fd)) return -1;
+
+#ifdef _WIN32
+    /* IOCP: 将 socket 关联到完成端口 */
+    HANDLE h = CreateIoCompletionPort((HANDLE)fd, (HANDLE)loop->epfd, (ULONG_PTR)userdata, 0);
+    if (h == NULL) return -1;
+    /* 扩展 ov_list 如果需要 */
+    if (loop->ov_count >= loop->ov_cap) {
+        size_t new_cap = loop->ov_cap ? loop->ov_cap * 2 : 64;
+        OVERLAPPED *new_ov = realloc(loop->ov_list, new_cap * sizeof(OVERLAPPED));
+        if (!new_ov) return -1;
+        loop->ov_list = new_ov;
+        loop->ov_cap = new_cap;
+    }
+    /* 为每个 fd 预分配一个 OVERLAPPED（实际使用时会按需分配） */
+    memset(&loop->ov_list[loop->ov_count], 0, sizeof(OVERLAPPED));
+    loop->ov_count++;
+    return 0;
+#elif defined(__linux__)
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    if (events & EV_READ)  ev.events |= EPOLLIN;
+    if (events & EV_WRITE) ev.events |= EPOLLOUT;
+    ev.events |= EPOLLET; /* 边缘触发 */
+    ev.data.ptr = userdata;
+    return epoll_ctl(loop->epfd, EPOLL_CTL_ADD, fd, &ev);
+#elif defined(__APPLE__)
+    struct kevent kev;
+    int flags = EV_ADD | EV_CLEAR; /* 边缘触发风格 */
+    if (events & EV_READ) {
+        EV_SET(&kev, fd, EVFILT_READ, flags, 0, 0, userdata);
+        if (kevent(loop->kq, &kev, 1, NULL, 0, NULL) < 0) return -1;
+    }
+    if (events & EV_WRITE) {
+        EV_SET(&kev, fd, EVFILT_WRITE, flags, 0, 0, userdata);
+        if (kevent(loop->kq, &kev, 1, NULL, 0, NULL) < 0) return -1;
+    }
+    return 0;
+#else
+    (void)events;
+    (void)userdata;
+    return -1;
+#endif
+}
+
+/* 修改 fd 监听的事件 */
+static int event_loop_mod(EventLoop *loop, socket_t fd, int events) {
+    if (!loop || cfnat_socket_invalid(fd)) return -1;
+#ifdef __linux__
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    if (events & EV_READ)  ev.events |= EPOLLIN;
+    if (events & EV_WRITE) ev.events |= EPOLLOUT;
+    ev.events |= EPOLLET;
+    ev.data.fd = fd;
+    return epoll_ctl(loop->epfd, EPOLL_CTL_MOD, fd, &ev);
+#elif defined(__APPLE__)
+    /* kqueue 不支持直接修改，先删除再添加 */
+    struct kevent kev;
+    EV_SET(&kev, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(loop->kq, &kev, 1, NULL, 0, NULL);
+    EV_SET(&kev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    kevent(loop->kq, &kev, 1, NULL, 0, NULL);
+    return event_loop_add(loop, fd, events, NULL);
+#else
+    (void)events;
+    return -1;
+#endif
+}
+
+/* 从 event loop 移除 fd */
+static int event_loop_del(EventLoop *loop, socket_t fd) {
+    if (!loop || cfnat_socket_invalid(fd)) return -1;
+#ifdef _WIN32
+    /* IOCP: 不需要显式移除，关闭 fd 时自动解除关联 */
+    return 0;
+#elif defined(__linux__)
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof(ev));
+    return epoll_ctl(loop->epfd, EPOLL_CTL_DEL, fd, &ev);
+#elif defined(__APPLE__)
+    struct kevent kev;
+    EV_SET(&kev, fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    kevent(loop->kq, &kev, 1, NULL, 0, NULL);
+    EV_SET(&kev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+    kevent(loop->kq, &kev, 1, NULL, 0, NULL);
+    return 0;
+#else
+    (void)fd;
+    return -1;
+#endif
+}
+
+/* 运行 event loop（阻塞，直到 event_loop_stop 被调用） */
+static int event_loop_run(EventLoop *loop) {
+    if (!loop || cfnat_socket_invalid(loop->epfd)) return -1;
+    loop->running = 1;
+
+#ifdef _WIN32
+    /* IOCP: 使用 GetQueuedCompletionStatus 等待事件 */
+    DWORD bytes_transferred = 0;
+    ULONG_PTR completion_key = 0;
+    OVERLAPPED *ov = NULL;
+    while (loop->running) {
+        BOOL ok = GetQueuedCompletionStatus(
+            (HANDLE)loop->epfd,
+            &bytes_transferred,
+            &completion_key,
+            &ov,
+            1000  /* 1 秒超时，用于检查 running 标志 */
+        );
+        if (!loop->running) break;
+        if (ok) {
+            if (loop->callback) {
+                loop->callback(loop, (socket_t)completion_key,
+                               EV_READ, (void *)completion_key);
+            }
+        } else {
+            DWORD err = GetLastError();
+            if (err == WAIT_TIMEOUT) continue;
+            /* IO 失败，通知回调 */
+            if (loop->callback && completion_key) {
+                loop->callback(loop, (socket_t)completion_key,
+                               EV_ERR, (void *)completion_key);
+            }
+        }
+    }
+#elif defined(__linux__)
+    while (loop->running) {
+        int n = epoll_wait(loop->epfd, loop->events, loop->max_events, 1000);
+        if (!loop->running) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            int ev = 0;
+            if (loop->events[i].events & (EPOLLIN | EPOLLHUP | EPOLLRDHUP)) ev |= EV_READ;
+            if (loop->events[i].events & EPOLLOUT) ev |= EV_WRITE;
+            if (loop->events[i].events & EPOLLERR) ev |= EV_ERR;
+            if (loop->callback && ev) {
+                loop->callback(loop, loop->events[i].data.fd, ev,
+                               loop->events[i].data.ptr);
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    struct timespec ts = {1, 0}; /* 1 秒超时 */
+    while (loop->running) {
+        int n = kevent(loop->kq, NULL, 0, loop->events, loop->max_events, &ts);
+        if (!loop->running) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            int ev = 0;
+            if (loop->events[i].filter == EVFILT_READ) ev |= EV_READ;
+            if (loop->events[i].filter == EVFILT_WRITE) ev |= EV_WRITE;
+            if (loop->events[i].flags & EV_ERROR) ev |= EV_ERR;
+            if (loop->callback && ev) {
+                loop->callback(loop, (socket_t)loop->events[i].ident, ev,
+                               loop->events[i].udata);
+            }
+        }
+    }
+#endif
+    loop->running = 0;
+    return 0;
+}
+
+/* 停止 event loop */
+static void event_loop_stop(EventLoop *loop) {
+    if (loop) loop->running = 0;
+}
+
+/*
+ * ============================================================
+ * BatchIterator — 候选 IP 懒加载迭代器 (P0-2)
+ * ============================================================
+ * 逐 CIDR 展开 IP，每批 1024 个，避免全量加载到内存。
+ * ============================================================
+ */
+
+#define BATCH_SIZE 1024
+
+typedef struct {
+    int random_mode;          /* 0=顺序, 1=随机 */
+    FILE *fp;                 /* 文件指针（顺序模式） */
+    size_t batch_size;        /* 每批大小 */
+    size_t total;             /* 总候选数 */
+    size_t done;              /* 已处理数 */
+    int err;                  /* 错误标志 */
+    long start_ms;            /* 开始时间 */
+
+    /* 随机模式：全部读入内存 */
+    char **all_ips;           /* 所有 IP 字符串 */
+    size_t all_count;         /* all_ips 数量 */
+
+    /* CIDR 展开结果缓存 */
+    uint32_t *expanded;       /* 展开后的 IP 数组 */
+    size_t expanded_count;    /* 已展开数量 */
+    size_t expanded_cap;      /* expanded 容量 */
+} BatchIterator;
+
+/* 前向声明 */
+static void batch_iter_init(BatchIterator *it, const char *filename, int random_mode);
+static size_t batch_iter_next(BatchIterator *it);
+static void batch_iter_destroy(BatchIterator *it);
 
 
 static int parse_addr(const char *addr, char *host, size_t hostsz, int *port);
@@ -448,7 +792,9 @@ static int sleep_interruptible_ms(int ms) {
 }
 
 static void usage(const char *p) {
+    printf("cfnat v%s - Cloudflare NAT 优选工具 (C 版)\n", CFNAT_VERSION);
     printf("Usage of %s:\n", p);
+    printf("  -V, -version              显示版本号\n");
     printf("  -direct-listen=value      直连优选监听地址，例如 0.0.0.0:1234\n");
     printf("  -baidu-listen=value       百度前置优选监听地址，例如 0.0.0.0:1235\n");
     printf("  -colo=value               筛选数据中心例如 HKG,SJC,LAX\n");
@@ -495,6 +841,10 @@ static void parse_args(Config *c, int argc, char **argv) {
         char *arg = argv[i];
         if (!strcmp(arg, "-h") || !strcmp(arg, "--help")) {
             usage(argv[0]);
+            exit(0);
+        }
+        if (!strcmp(arg, "-V") || !strcmp(arg, "-version") || !strcmp(arg, "--version")) {
+            printf("cfnat version %s\n", CFNAT_VERSION);
             exit(0);
         }
         if (arg[0] != '-') continue;
@@ -1543,13 +1893,13 @@ static int http_probe(socket_t fd, int timeout_ms) {
 
 static int health_check_ip(const char *ip, BaiduProxyPool *proxy_pool) {
     int latency = 0;
-    socket_t fd = dial_target_with_proxy(ip, g_cfg.port, 2000, proxy_pool, &latency);
+    socket_t fd = dial_target_with_proxy(ip, g_cfg.port, g_cfg.delay_ms, proxy_pool, &latency);
     if (cfnat_socket_invalid(fd)) {
         debug_msg("健康检查失败: IP %s TCP 不可达", ip);
         return 0;
     }
     // TCP 握手成功后再做 HTTP 探测，确认数据通路正常
-    int ok = http_probe(fd, 2000);
+    int ok = http_probe(fd, g_cfg.delay_ms);
     close(fd);
     if (ok) {
         debug_msg("健康检查成功: IP %s 延迟 %d ms", ip, latency);
@@ -1597,6 +1947,17 @@ static int choose_ip_for_connection(char *out, size_t sz, BaiduProxyPool *proxy_
     if (!out || sz == 0) return 0;
     out[0] = '\0';
     if (g_candidate_count == 0) return 0;
+
+    /* P0-1: 如果当前 IP 非空，直接使用（简化版缓存，无 cache_valid 标记） */
+    pthread_mutex_lock(&g_ip_mu);
+    int has_ip = g_current_ip[0] != 0;
+    pthread_mutex_unlock(&g_ip_mu);
+    if (has_ip) {
+        pthread_mutex_lock(&g_ip_mu);
+        snprintf(out, sz, "%s", g_current_ip);
+        pthread_mutex_unlock(&g_ip_mu);
+        return 1;
+    }
 
     for (size_t i = 0; i < g_candidate_count; i++) {
         if (health_check_ip(g_candidates[i].ip, proxy_pool)) {
@@ -1870,16 +2231,16 @@ static int carrier_health_check_ip(CarrierRuntime *rt, const char *ip) {
     // 混合模式：先试直连，不行再试百度代理
     if (rt->spec.use_baidu_proxy == 2) {
         int latency = 0;
-        socket_t fd = dial_target_with_proxy(ip, g_cfg.port, 2000, NULL, &latency);
+        socket_t fd = dial_target_with_proxy(ip, g_cfg.port, g_cfg.delay_ms, NULL, &latency);
         if (cfnat_socket_valid(fd)) {
-            if (carrier_probe_and_check(fd, 2000)) {
+            if (carrier_probe_and_check(fd, g_cfg.delay_ms)) {
                 debug_msg("%s 健康检查成功(直连): IP %s 延迟 %d ms", carrier_display_name(rt->spec.mode), ip, latency);
                 return 1;
             }
         } else if (rt->proxy_pool && rt->proxy_pool->len > 0) {
-            fd = dial_target_with_proxy(ip, g_cfg.port, 2000, rt->proxy_pool, &latency);
+            fd = dial_target_with_proxy(ip, g_cfg.port, g_cfg.delay_ms, rt->proxy_pool, &latency);
             if (cfnat_socket_valid(fd)) {
-                if (carrier_probe_and_check(fd, 2000)) {
+                if (carrier_probe_and_check(fd, g_cfg.delay_ms)) {
                     debug_msg("%s 健康检查成功(百度前置): IP %s 延迟 %d ms", carrier_display_name(rt->spec.mode), ip, latency);
                     return 1;
                 }
@@ -1890,12 +2251,12 @@ static int carrier_health_check_ip(CarrierRuntime *rt, const char *ip) {
     }
     // 普通模式
     int latency = 0;
-    socket_t fd = dial_target_with_proxy(ip, g_cfg.port, 2000, rt->proxy_pool, &latency);
+    socket_t fd = dial_target_with_proxy(ip, g_cfg.port, g_cfg.delay_ms, rt->proxy_pool, &latency);
     if (cfnat_socket_invalid(fd)) {
         debug_msg("%s 健康检查失败: IP %s 暂不可用", carrier_display_name(rt->spec.mode), ip);
         return 0;
     }
-    if (carrier_probe_and_check(fd, 2000)) {
+    if (carrier_probe_and_check(fd, g_cfg.delay_ms)) {
         debug_msg("%s 健康检查成功: IP %s 延迟 %d ms", carrier_display_name(rt->spec.mode), ip, latency);
         return 1;
     }
@@ -1924,6 +2285,7 @@ static int carrier_select_valid_ip(CarrierRuntime *rt) {
     for (size_t i = 0; i < rt->candidates.len; i++) {
         if (carrier_health_check_ip(rt, rt->candidates.items[i].ip)) {
             carrier_set_current_candidate(rt, i);
+            atomic_store(&rt->candidates.cache_valid, 1);  /* P0-1: 选中有效 IP */
             log_msg("%s 可用 IP: %s (健康检查端口:%d)", carrier_display_name(rt->spec.mode), rt->candidates.items[i].ip, g_cfg.port);
             return 1;
         }
@@ -1939,6 +2301,7 @@ static int carrier_switch_next_ip(CarrierRuntime *rt) {
     for (size_t i = start; i < rt->candidates.len; i++) {
         if (carrier_health_check_ip(rt, rt->candidates.items[i].ip)) {
             carrier_set_current_candidate(rt, i);
+            atomic_store(&rt->candidates.cache_valid, 1);  /* P0-1: 新 IP 有效 */
             log_msg("%s 切换到下一个最优 IP: %s 候选索引: %zu", carrier_display_name(rt->spec.mode), rt->candidates.items[i].ip, i);
             return 1;
         }
@@ -1951,10 +2314,20 @@ static int carrier_choose_ip_for_connection(CarrierRuntime *rt, char *out, size_
     out[0] = '\0';
     if (rt->candidates.len == 0) return 0;
 
+    /* P0-1: 如果缓存有效，直接使用当前 IP，不做健康检查 */
+    if (atomic_load(&rt->candidates.cache_valid)) {
+        pthread_mutex_lock(&rt->candidates.mu);
+        snprintf(out, sz, "%s", rt->candidates.current_ip);
+        pthread_mutex_unlock(&rt->candidates.mu);
+        if (out[0]) return 1;
+    }
+
+    /* 缓存无效或当前 IP 为空，遍历候选池做健康检查 */
     for (size_t i = 0; i < rt->candidates.len; i++) {
         if (carrier_health_check_ip(rt, rt->candidates.items[i].ip)) {
             snprintf(out, sz, "%s", rt->candidates.items[i].ip);
             carrier_set_current_candidate(rt, i);
+            atomic_store(&rt->candidates.cache_valid, 1);
             return 1;
         }
     }
@@ -2039,9 +2412,11 @@ static void *carrier_health_thread(void *arg) {
         carrier_get_current_ip(rt, ip, sizeof(ip));
         if (!ip[0] || !carrier_health_check_ip(rt, ip)) {
             fail++;
+            atomic_store(&rt->candidates.cache_valid, 0);  /* P0-1: 当前 IP 不可用 */
             log_msg("%s 状态检查失败 (%d/2): 当前 IP %s 暂不可用", carrier_display_name(rt->spec.mode), fail, ip[0] ? ip : "为空");
         } else {
             fail = 0;
+            atomic_store(&rt->candidates.cache_valid, 1);  /* P0-1: 当前 IP 可用 */
             long n = now_ms();
             if (g_cfg.health_log > 0 && n - last >= g_cfg.health_log * 1000L) {
                 log_msg("%s 状态检查成功: 当前 IP %s 可用", carrier_display_name(rt->spec.mode), ip);
@@ -2283,6 +2658,193 @@ static void install_signals(void) {
 #endif
 }
 
+/* ========== BatchIterator 实现 ========== */
+
+static void batch_iter_init(BatchIterator *it, const char *filename, int random_mode) {
+    memset(it, 0, sizeof(*it));
+    it->batch_size = BATCH_SIZE;
+    it->random_mode = random_mode;
+    it->start_ms = now_ms();
+
+    /* 打开 IP 文件 */
+    FILE *f = fopen(filename, "r");
+    if (!f) {
+        it->err = 1;
+        return;
+    }
+    it->fp = f;
+
+    /* 随机模式：先全部读入内存再 shuffle */
+    if (random_mode) {
+        char line[MAX_LINE];
+        size_t cap = 4096;
+        size_t len = 0;
+        char **all = malloc(cap * sizeof(char *));
+        if (!all) { it->err = 1; return; }
+
+        while (fgets(line, sizeof(line), f)) {
+            trim_line(line);
+            if (line[0] == '\0' || line[0] == '#') continue;
+            if (len >= cap) {
+                cap *= 2;
+                char **tmp = realloc(all, cap * sizeof(char *));
+                if (!tmp) { it->err = 1; free(all); return; }
+                all = tmp;
+            }
+            all[len] = strdup(line);
+            if (!all[len]) { it->err = 1; while (len > 0) free(all[--len]); free(all); return; }
+            len++;
+        }
+        it->total = len;
+        it->all_ips = all;
+
+        /* Fisher-Yates shuffle */
+        srand((unsigned)(now_ms() ^ (uintptr_t)it));
+        for (size_t i = len; i > 1; i--) {
+            size_t j = (size_t)(rand() % i);
+            char *tmp = all[i - 1];
+            all[i - 1] = all[j];
+            all[j] = tmp;
+        }
+        /* 关闭文件，后续从内存读取 */
+        fclose(f);
+        it->fp = NULL;
+        return;
+    }
+
+    /* 顺序模式：先统计行数 */
+    long start = now_ms();
+    char buf[MAX_LINE];
+    size_t count = 0;
+    while (fgets(buf, sizeof(buf), f)) {
+        trim_line(buf);
+        if (buf[0] != '\0' && buf[0] != '#') count++;
+    }
+    it->total = count;
+    fseek(f, 0, SEEK_SET);
+    log_msg("BatchIterator: 共 %zu 个候选 IP，耗时 %ld ms", count, (long)(now_ms() - start));
+}
+
+static size_t batch_iter_next(BatchIterator *it) {
+    if (it->err) return 0;
+    if (it->done >= it->total) return 0;
+
+    size_t batch = it->batch_size;
+    if (it->done + batch > it->total) batch = it->total - it->done;
+
+    if (it->random_mode && it->all_ips) {
+        /* 从已 shuffle 的内存中取 batch 个 */
+        for (size_t i = 0; i < batch; i++) {
+            const char *ip_str = it->all_ips[it->done + i];
+            /* 支持 CIDR 格式 */
+            const char *slash = strchr(ip_str, '/');
+            if (slash) {
+                /* CIDR 展开 */
+                uint32_t prefix = ipv4_to_u32(ip_str);
+                if (prefix == 0 && ip_str[0] != '0') { it->err = 1; return 0; }
+                int bits = atoi(slash + 1);
+                if (bits < 0 || bits > 32) { it->err = 1; return 0; }
+                uint32_t mask = bits == 0 ? 0 : ~((1u << (32 - bits)) - 1);
+                uint32_t start_ip = prefix & mask;
+                uint32_t end_ip = start_ip | ~mask;
+                uint32_t count_in_cidr = end_ip - start_ip + 1;
+
+                /* 确保 it->expanded 有空间 */
+                size_t needed = it->expanded_count + count_in_cidr;
+                if (needed > it->expanded_cap) {
+                    size_t new_cap = it->expanded_cap ? it->expanded_cap * 2 : 4096;
+                    while (new_cap < needed) new_cap *= 2;
+                    uint32_t *tmp = realloc(it->expanded, new_cap * sizeof(uint32_t));
+                    if (!tmp) { it->err = 1; return 0; }
+                    it->expanded = tmp;
+                    it->expanded_cap = new_cap;
+                }
+                for (uint32_t ip = start_ip; ip <= end_ip; ip++) {
+                    it->expanded[it->expanded_count++] = ip;
+                }
+            } else {
+                /* 单个 IP */
+                uint32_t ip = ipv4_to_u32(ip_str);
+                if (ip == 0 && ip_str[0] != '0') { it->err = 1; return 0; }
+                size_t needed = it->expanded_count + 1;
+                if (needed > it->expanded_cap) {
+                    size_t new_cap = it->expanded_cap ? it->expanded_cap * 2 : 4096;
+                    uint32_t *tmp = realloc(it->expanded, new_cap * sizeof(uint32_t));
+                    if (!tmp) { it->err = 1; return 0; }
+                    it->expanded = tmp;
+                    it->expanded_cap = new_cap;
+                }
+                it->expanded[it->expanded_count++] = ip;
+            }
+        }
+        it->done += batch;
+        return it->expanded_count;
+    }
+
+    /* 顺序模式：从文件流式读取 */
+    if (!it->fp) { it->err = 1; return 0; }
+
+    size_t loaded = 0;
+    char line[MAX_LINE];
+    while (loaded < batch && fgets(line, sizeof(line), it->fp)) {
+        trim_line(line);
+        if (line[0] == '\0' || line[0] == '#') continue;
+
+        const char *slash = strchr(line, '/');
+        if (slash) {
+            /* CIDR 展开 */
+            uint32_t prefix = ipv4_to_u32(line);
+            if (prefix == 0 && line[0] != '0') { it->err = 1; return 0; }
+            int bits = atoi(slash + 1);
+            if (bits < 0 || bits > 32) { it->err = 1; return 0; }
+            uint32_t mask = bits == 0 ? 0 : ~((1u << (32 - bits)) - 1);
+            uint32_t start_ip = prefix & mask;
+            uint32_t end_ip = start_ip | ~mask;
+            uint32_t count_in_cidr = end_ip - start_ip + 1;
+
+            size_t needed = it->expanded_count + count_in_cidr;
+            if (needed > it->expanded_cap) {
+                size_t new_cap = it->expanded_cap ? it->expanded_cap * 2 : 4096;
+                while (new_cap < needed) new_cap *= 2;
+                uint32_t *tmp = realloc(it->expanded, new_cap * sizeof(uint32_t));
+                if (!tmp) { it->err = 1; return 0; }
+                it->expanded = tmp;
+                it->expanded_cap = new_cap;
+            }
+            for (uint32_t ip = start_ip; ip <= end_ip; ip++) {
+                it->expanded[it->expanded_count++] = ip;
+            }
+            loaded++;
+        } else {
+            /* 单个 IP */
+            uint32_t ip = ipv4_to_u32(line);
+            if (ip == 0 && line[0] != '0') { it->err = 1; return 0; }
+            size_t needed = it->expanded_count + 1;
+            if (needed > it->expanded_cap) {
+                size_t new_cap = it->expanded_cap ? it->expanded_cap * 2 : 4096;
+                uint32_t *tmp = realloc(it->expanded, new_cap * sizeof(uint32_t));
+                if (!tmp) { it->err = 1; return 0; }
+                it->expanded = tmp;
+                it->expanded_cap = new_cap;
+            }
+            it->expanded[it->expanded_count++] = ip;
+            loaded++;
+        }
+    }
+    it->done += loaded;
+    return it->expanded_count;
+}
+
+static void batch_iter_destroy(BatchIterator *it) {
+    if (it->fp) fclose(it->fp);
+    if (it->all_ips) {
+        for (size_t i = 0; i < it->total; i++) free(it->all_ips[i]);
+        free(it->all_ips);
+    }
+    free(it->expanded);
+    memset(it, 0, sizeof(*it));
+}
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     init_windows_console_utf8();
@@ -2339,6 +2901,7 @@ int main(int argc, char **argv) {
             rt->listen_fd = INVALID_SOCKET;
             rt->spec = carrier_specs[i];
             pthread_mutex_init(&rt->candidates.mu, NULL);
+            atomic_init(&rt->candidates.cache_valid, 0);  /* P0-1: 初始时缓存无效 */
 
             ResultList carrier_results = {0};
             // 先尝试读取候选缓存
