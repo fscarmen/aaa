@@ -238,7 +238,7 @@ static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
 /* 事件类型 */
 #define EV_READ  1
 #define EV_WRITE 2
-#define EV_ERR   4
+#define EVF_ERR   4
 
 /* 前向声明 */
 typedef struct EventLoop EventLoop;
@@ -274,7 +274,7 @@ static int event_loop_init(EventLoop *loop, int max_events,
 #ifdef _WIN32
     /* Windows: IOCP 完成端口 */
     loop->epfd = (socket_t)CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-    if (loop->epfd == NULL) {
+    if (loop->epfd == 0) {
         loop->epfd = INVALID_SOCKET;
         return -1;
     }
@@ -325,7 +325,7 @@ static int event_loop_init(EventLoop *loop, int max_events,
 static void event_loop_destroy(EventLoop *loop) {
     if (!loop) return;
 #ifdef _WIN32
-    if (loop->epfd != NULL && loop->epfd != INVALID_SOCKET) {
+    if (loop->epfd != 0 && loop->epfd != INVALID_SOCKET) {
         CloseHandle((HANDLE)loop->epfd);
     }
     free(loop->ov_list);
@@ -340,7 +340,9 @@ static void event_loop_destroy(EventLoop *loop) {
     free(loop->events);
 #endif
     loop->epfd = INVALID_SOCKET;
+#if defined(__linux__) || defined(__APPLE__)
     loop->events = NULL;
+#endif
 }
 
 /* 添加 fd 到 event loop */
@@ -468,7 +470,7 @@ static int event_loop_run(EventLoop *loop) {
             /* IO 失败，通知回调 */
             if (loop->callback && completion_key) {
                 loop->callback(loop, (socket_t)completion_key,
-                               EV_ERR, (void *)completion_key);
+                               EVF_ERR, (void *)completion_key);
             }
         }
     }
@@ -484,7 +486,7 @@ static int event_loop_run(EventLoop *loop) {
             int ev = 0;
             if (loop->events[i].events & (EPOLLIN | EPOLLHUP | EPOLLRDHUP)) ev |= EV_READ;
             if (loop->events[i].events & EPOLLOUT) ev |= EV_WRITE;
-            if (loop->events[i].events & EPOLLERR) ev |= EV_ERR;
+            if (loop->events[i].events & EPOLLERR) ev |= EVF_ERR;
             if (loop->callback && ev) {
                 loop->callback(loop, loop->events[i].data.fd, ev,
                                loop->events[i].data.ptr);
@@ -504,7 +506,7 @@ static int event_loop_run(EventLoop *loop) {
             int ev = 0;
             if (loop->events[i].filter == EVFILT_READ) ev |= EV_READ;
             if (loop->events[i].filter == EVFILT_WRITE) ev |= EV_WRITE;
-            if (loop->events[i].flags & EV_ERROR) ev |= EV_ERR;
+            if (loop->events[i].flags & EV_ERROR) ev |= EVF_ERR;
             if (loop->callback && ev) {
                 loop->callback(loop, (socket_t)loop->events[i].ident, ev,
                                loop->events[i].udata);
