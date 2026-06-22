@@ -1775,9 +1775,11 @@ static int carrier_try_use_candidate_cache(CarrierRuntime *rt) {
     rt->candidates.items = cached.items;
     rt->candidates.len = cached.len;
     carrier_set_current_candidate(rt, first_good);
+    atomic_store(&rt->candidates.cache_valid, 1);  /* P0-1: 缓存命中，标记为有效 */
     log_msg("%s 命中候选缓存，快速启动使用 IP: %s", carrier_display_name(rt->spec.mode), cached.items[first_good].ip);
     // 注意：pthread_mutex_init 已在外面初始化，此处不重复初始化
     // cached.mu 不再需要，但指向的 items 已被 rt 接管，不要销毁
+    pthread_mutex_destroy(&cached.mu);
     return 1;
 }
 
@@ -1903,19 +1905,26 @@ static int health_check_ip(const char *ip, BaiduProxyPool *proxy_pool) {
 static void close_pair(socket_t a, socket_t b) {
     shutdown(a, SHUT_RDWR);
     shutdown(b, SHUT_RDWR);
+    close(a);
+    close(b);
 }
 
 /* P1-2: 带超时的 recv，超时返回 -1，errno = ETIMEDOUT */
 static ssize_t recv_timeout(socket_t fd, void *buf, size_t len, int timeout_ms) {
     if (timeout_ms <= 0) return recv(fd, buf, len, 0);
     fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    int rc = select((int)(fd + 1), &rfds, NULL, NULL, &tv);
-    if (rc <= 0) {
-        if (rc == 0) errno = ETIMEDOUT;
-        return -1;
+    struct timeval tv;
+    for (;;) {
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        int rc = select((int)(fd + 1), &rfds, NULL, NULL, &tv);
+        if (rc > 0) break;
+        if (rc == 0) { errno = ETIMEDOUT; return -1; }
+        /* rc < 0 */
+        if (errno != EINTR) return -1;
+        /* EINTR: 被信号中断，重试 select */
     }
     return recv(fd, buf, len, 0);
 }
@@ -2064,8 +2073,10 @@ static void *connection_thread(void *arg) {
     }
     send(upstream, (const char *) & first, 1, 0);
     relay_bidirectional(client, upstream);
-    close(upstream);
-    out : close(client);
+    /* relay_bidirectional 中的 pipe_worker 已通过 close_pair 关闭 client 和 upstream */
+    client = INVALID_SOCKET;
+    upstream = INVALID_SOCKET;
+    out : if (cfnat_socket_valid(client)) close(client);
     int active = atomic_fetch_sub(&g_active_connections, 1) - 1;
     conn_msg("客户端连接关闭，当前活跃连接数: %d", active);
     free(cc);
