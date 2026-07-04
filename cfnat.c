@@ -3067,7 +3067,14 @@ static void *connection_thread(void *arg) {
     char sni_host[MAX_DOMAIN_LEN] = {0};
     if (is_tls) {
         client_hello_len = read_tls_client_hello(client, first, client_hello, sizeof(client_hello), cc->delay_ms);
+        debug_msg("#%llu read_tls_client_hello 返回 %zu 字节", cc->conn_id, client_hello_len);
+        if (client_hello_len >= 9) {
+            size_t hs_len = ((size_t)client_hello[6] << 16) | ((size_t)client_hello[7] << 8) | client_hello[8];
+            debug_msg("#%llu TLS 握手消息长度: %zu, 记录长度: %zu",
+                     cc->conn_id, hs_len, (size_t)((client_hello[3] << 8) | client_hello[4]));
+        }
         parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
+        debug_msg("#%llu 解析 SNI: '%s' (长度: %zu)", cc->conn_id, sni_host, strlen(sni_host));
     }
     conn_msg("#%llu %s 识别客户端协议: %s，转发到 IP: %s 端口: %d%s%s",
              cc->conn_id, cc->client_addr[0] ? cc->client_addr : "unknown",
