@@ -1586,25 +1586,19 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
                 if (q + name_len > list_end) break;
                 if (name_type == 0 && name_len > 0) {
                     size_t n = name_len < outsz ? name_len : outsz - 1;
-                    /* 仅允许合法域名字符，过滤掉非 ASCII 可打印字符 */
-                    int valid = 1;
-                    for (size_t i = 0; i < n; i++) {
+                    /* 过滤非法字符: 仅复制合法域名字符, 跳过噪声字节 */
+                    size_t o = 0;
+                    for (size_t i = 0; i < n && o < outsz - 1; i++) {
                         unsigned char c = buf[q + i];
-                        if (!((c >= 'a' && c <= 'z') ||
-                              (c >= 'A' && c <= 'Z') ||
-                              (c >= '0' && c <= '9') ||
-                              c == '-' || c == '.' || c == '_' || c == '*')) {
-                            valid = 0;
-                            break;
+                        if ((c >= 'a' && c <= 'z') ||
+                            (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') ||
+                            c == '-' || c == '.' || c == '_' || c == '*') {
+                            out[o++] = (char)c;
                         }
                     }
-                    if (!valid) {
-                        q += name_len;
-                        continue;
-                    }
-                    memcpy(out, buf + q, n);
-                    out[n] = '\0';
-                    return out[0] != '\0';
+                    out[o] = '\0';
+                    return o > 0;
                 }
                 q += name_len;
             }
