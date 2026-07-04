@@ -416,6 +416,7 @@ static int cidrlist_get_ip(CidrList *cl, size_t global_idx, char *out, size_t ou
 }
 
 /* 释放 CIDR 列表 */
+static void cidrlist_destroy(CidrList *cl) __attribute__((unused));
 static void cidrlist_destroy(CidrList *cl) {
     if (!cl) return;
     free(cl->entries);
@@ -424,6 +425,7 @@ static void cidrlist_destroy(CidrList *cl) {
 }
 
 /* 从文件加载 CIDR 列表（替换 load_ip_list） */
+static CidrList load_cidr_list(const char *filename, int random_mode) __attribute__((unused));
 static CidrList load_cidr_list(const char *filename, int random_mode) {
     CidrList cl = {0};
     cl.random_mode = random_mode;
@@ -1533,16 +1535,15 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     size_t used = 1;
     buf[0] = first;
     int wait_ms = timeout_ms > 0 && timeout_ms < 1500 ? timeout_ms : 1500;
-    /* 必须读到完整的 5 字节 TLS record header，否则无法确定 record_len */
-    if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) {
-        return 0;  /* 数据不足，无法解析 record header */
-    }
+    if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) return used;
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    /* 尝试读取完整的 record body；即使读不够也返回已读数据，
-       由调用方的完整性检查和 parse_tls_sni 的 ASCII 验证兜底 */
-    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
+    /* 必须检查 recv_more_timeout 的返回值，否则 used 可能小于 need，
+       导致 parse_tls_sni 读到不完整的数据而产生乱码 SNI */
+    if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
+        return 0;
+    }
     return used;
 }
 
@@ -1589,13 +1590,6 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
                 if (q + name_len > list_end) break;
                 if (name_type == 0 && name_len > 0) {
                     size_t n = name_len < outsz ? name_len : outsz - 1;
-                    /* 验证 SNI 名称只包含可打印 ASCII 字符，避免栈垃圾导致乱码 */
-                    int valid = 1;
-                    for (size_t i = 0; i < n; i++) {
-                        unsigned char c = buf[q + i];
-                        if (c < 0x20 || c > 0x7e) { valid = 0; break; }
-                    }
-                    if (!valid) break;
                     memcpy(out, buf + q, n);
                     out[n] = '\0';
                     return out[0] != '\0';
@@ -1610,6 +1604,7 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
 
 /* ── EventLoop 版 I/O 函数 ─────────────────────────────────── */
 /* 基于 EventLoop 的 TCP 连接，替代 tcp_connect 中的 select() */
+static socket_t tcp_connect_ev(const char *ip, int port, int timeout_ms, int *latency_ms, EventLoop *el) __attribute__((unused));
 static socket_t tcp_connect_ev(const char *ip, int port, int timeout_ms, int *latency_ms, EventLoop *el) {
     long start = now_ms();
     int family = strchr(ip, ':') ? AF_INET6 : AF_INET;
@@ -2087,7 +2082,7 @@ static int parse_custom_doh_resolver(const char *spec, DohResolver *out, char *l
     out->host = hostbuf;
     out->ip = ipbuf;
     out->path = pathbuf;
-    if (label && labelsz > 0) snprintf(label, labelsz, "DoH(%s)", hostbuf);
+    if (label && labelsz > 0) snprintf(label, labelsz, "DoH(%.50s)", hostbuf);
     return 0;
 }
 
@@ -3071,12 +3066,8 @@ static void *connection_thread(void *arg) {
     size_t client_hello_len = 0;
     char sni_host[MAX_DOMAIN_LEN] = {0};
     if (is_tls) {
-        memset(client_hello, 0, sizeof(client_hello));
         client_hello_len = read_tls_client_hello(client, first, client_hello, sizeof(client_hello), cc->delay_ms);
-        /* 解析 SNI，parse_tls_sni 内部有完整的边界检查和 ASCII 验证 */
-        if (client_hello_len >= 9) {
-            parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
-        }
+        parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
     }
     conn_msg("#%llu %s 识别客户端协议: %s，转发到 IP: %s 端口: %d%s%s",
              cc->conn_id, cc->client_addr[0] ? cc->client_addr : "unknown",
