@@ -1544,7 +1544,9 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
         return 0;
     }
-    return used;
+    /* TCP 是流协议，recv 可能返回多于 need 的字节（包含后续 TLS 记录）。
+       只返回第一个 TLS 记录的数据，避免 parse_tls_sni 读到跨记录的错误数据 */
+    return need;
 }
 
 static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t outsz) {
