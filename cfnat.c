@@ -1533,11 +1533,15 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     size_t used = 1;
     buf[0] = first;
     int wait_ms = timeout_ms > 0 && timeout_ms < 1500 ? timeout_ms : 1500;
-    if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) return used;
+    /* 必须读到完整的 5 字节 TLS record header，否则无法确定 record_len */
+    if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) {
+        if (used < 5) return 0;  /* 数据不足，无法解析 record header */
+        return used;
+    }
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) return used;
+    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
     return used;
 }
 
