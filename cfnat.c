@@ -1539,14 +1539,20 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    /* 必须检查 recv_more_timeout 的返回值，否则 used 可能小于 need，
-       导致 parse_tls_sni 读到不完整的数据而产生乱码 SNI */
     if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
         return 0;
     }
-    /* TCP 是流协议，recv 可能返回多于 need 的字节（包含后续 TLS 记录）。
-       只返回第一个 TLS 记录的数据，避免 parse_tls_sni 读到跨记录的错误数据 */
-    return need;
+    /* TLS ClientHello 可能被分片到多个 TLS 记录中（如 trojan 客户端）。
+       从握手消息头获取完整的握手消息长度，继续读取后续 TLS 记录。 */
+    if (used >= 9 && buf[5] == 0x01) {
+        size_t hs_len = ((size_t)buf[6] << 16) | ((size_t)buf[7] << 8) | buf[8];
+        size_t hs_total = 9 + hs_len;  /* 完整握手消息需要的总字节数 */
+        if (hs_total > cap) hs_total = cap;
+        if (hs_total > used) {
+            recv_more_timeout(client, buf, &used, hs_total, cap, wait_ms);
+        }
+    }
+    return used;
 }
 
 static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t outsz) {
