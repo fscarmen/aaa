@@ -1540,10 +1540,9 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    /* 必须读到完整的 record body，否则不返回给 parse_tls_sni */
-    if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
-        return 0;  /* body 数据不足，放弃解析 */
-    }
+    /* 尝试读取完整的 record body；即使读不够也返回已读数据，
+       由调用方的完整性检查和 parse_tls_sni 的 ASCII 验证兜底 */
+    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
     return used;
 }
 
