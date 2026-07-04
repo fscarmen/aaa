@@ -1539,59 +1539,7 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
-        return 0;
-    }
-    /* TLS ClientHello 可能被分片到多个 TLS 记录中（如 trojan 客户端）。
-       需要从后续 TLS 记录中提取握手消息数据，跳过每个 TLS 记录的 5 字节头部。 */
-    if (used >= 9 && buf[5] == 0x01) {
-        size_t hs_len = ((size_t)buf[6] << 16) | ((size_t)buf[7] << 8) | buf[8];
-        size_t hs_total = 9 + hs_len;  /* 完整握手消息需要的总字节数 */
-        if (hs_total > cap) hs_total = cap;
-        /* 已从第一个 TLS 记录中读取的握手消息数据量（从 offset 5 开始） */
-        size_t hs_got = used - 5;
-        if (hs_got > hs_len + 4) hs_got = hs_len + 4;
-        /* 如果数据不够，继续读取后续 TLS 记录 */
-        if (hs_got < hs_len && 5 + hs_got < cap) {
-            /* 使用临时缓冲区读取原始数据，避免 TLS 记录头污染握手消息缓冲区 */
-            unsigned char raw[8192];
-            size_t raw_used = 0;
-            long deadline = now_ms() + wait_ms;
-            while (hs_got < hs_len && 5 + hs_got < cap && now_ms() < deadline) {
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(client, &rfds);
-                int left = (int)(deadline - now_ms());
-                if (left <= 0) break;
-                struct timeval tv = { left / 1000, (left % 1000) * 1000 };
-                int rc = select(client + 1, &rfds, NULL, NULL, &tv);
-                if (rc <= 0) break;
-                ssize_t n = recv(client, (char *)raw + raw_used, sizeof(raw) - raw_used, 0);
-                if (n <= 0) break;
-                raw_used += (size_t)n;
-            }
-            /* 解析原始数据中的 TLS 记录，提取握手消息 payload */
-            size_t raw_pos = 0;
-            while (raw_pos + 5 <= raw_used && hs_got < hs_len && 5 + hs_got < cap) {
-                /* 检查是否是 TLS 记录（ContentType 0x16 = Handshake） */
-                if (raw[raw_pos] != 0x16) break;
-                size_t rlen = ((size_t)raw[raw_pos + 3] << 8) | raw[raw_pos + 4];
-                size_t rec_end = raw_pos + 5 + rlen;
-                if (rec_end > raw_used) break;
-                /* 复制 TLS 记录 payload 到握手消息缓冲区 */
-                size_t copy = rlen;
-                if (hs_got + copy > hs_len) copy = hs_len - hs_got;
-                if (5 + hs_got + copy > cap) copy = cap - (5 + hs_got);
-                memmove(buf + 5 + hs_got, raw + raw_pos + 5, copy);
-                hs_got += copy;
-                raw_pos = rec_end;
-            }
-        }
-        /* 返回重组后的数据量：5 字节 TLS 记录头 + 4 字节握手消息头 + 握手消息数据 */
-        size_t total = 5 + 4 + hs_got;
-        if (total > cap) total = cap;
-        return total;
-    }
+    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
     return used;
 }
 
@@ -1638,6 +1586,22 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
                 if (q + name_len > list_end) break;
                 if (name_type == 0 && name_len > 0) {
                     size_t n = name_len < outsz ? name_len : outsz - 1;
+                    /* 仅允许合法域名字符，过滤掉非 ASCII 可打印字符 */
+                    int valid = 1;
+                    for (size_t i = 0; i < n; i++) {
+                        unsigned char c = buf[q + i];
+                        if (!((c >= 'a' && c <= 'z') ||
+                              (c >= 'A' && c <= 'Z') ||
+                              (c >= '0' && c <= '9') ||
+                              c == '-' || c == '.' || c == '_' || c == '*')) {
+                            valid = 0;
+                            break;
+                        }
+                    }
+                    if (!valid) {
+                        q += name_len;
+                        continue;
+                    }
                     memcpy(out, buf + q, n);
                     out[n] = '\0';
                     return out[0] != '\0';
@@ -3115,14 +3079,7 @@ static void *connection_thread(void *arg) {
     char sni_host[MAX_DOMAIN_LEN] = {0};
     if (is_tls) {
         client_hello_len = read_tls_client_hello(client, first, client_hello, sizeof(client_hello), cc->delay_ms);
-        debug_msg("#%llu read_tls_client_hello 返回 %zu 字节", cc->conn_id, client_hello_len);
-        if (client_hello_len >= 9) {
-            size_t hs_len = ((size_t)client_hello[6] << 16) | ((size_t)client_hello[7] << 8) | client_hello[8];
-            debug_msg("#%llu TLS 握手消息长度: %zu, 记录长度: %zu",
-                     cc->conn_id, hs_len, (size_t)((client_hello[3] << 8) | client_hello[4]));
-        }
         parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
-        debug_msg("#%llu 解析 SNI: '%s' (长度: %zu)", cc->conn_id, sni_host, strlen(sni_host));
     }
     conn_msg("#%llu %s 识别客户端协议: %s，转发到 IP: %s 端口: %d%s%s",
              cc->conn_id, cc->client_addr[0] ? cc->client_addr : "unknown",
