@@ -3073,12 +3073,9 @@ static void *connection_thread(void *arg) {
     if (is_tls) {
         memset(client_hello, 0, sizeof(client_hello));
         client_hello_len = read_tls_client_hello(client, first, client_hello, sizeof(client_hello), cc->delay_ms);
-        /* 只解析完整的 ClientHello，避免栈垃圾导致 SNI 乱码 */
-        if (client_hello_len >= 9 && client_hello[0] == 0x16 && client_hello[5] == 0x01) {
-            size_t hs_len = ((size_t)client_hello[6] << 16) | ((size_t)client_hello[7] << 8) | client_hello[8];
-            if (client_hello_len >= 9 + hs_len) {
-                parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
-            }
+        /* 解析 SNI，parse_tls_sni 内部有完整的边界检查和 ASCII 验证 */
+        if (client_hello_len >= 9) {
+            parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
         }
     }
     conn_msg("#%llu %s 识别客户端协议: %s，转发到 IP: %s 端口: %d%s%s",
