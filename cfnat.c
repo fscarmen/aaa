@@ -1535,13 +1535,15 @@ static size_t read_tls_client_hello(socket_t client, unsigned char first, unsign
     int wait_ms = timeout_ms > 0 && timeout_ms < 1500 ? timeout_ms : 1500;
     /* 必须读到完整的 5 字节 TLS record header，否则无法确定 record_len */
     if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) {
-        if (used < 5) return 0;  /* 数据不足，无法解析 record header */
-        return used;
+        return 0;  /* 数据不足，无法解析 record header */
     }
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
+    /* 必须读到完整的 record body，否则不返回给 parse_tls_sni */
+    if (!recv_more_timeout(client, buf, &used, need, cap, wait_ms)) {
+        return 0;  /* body 数据不足，放弃解析 */
+    }
     return used;
 }
 
@@ -1588,6 +1590,13 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
                 if (q + name_len > list_end) break;
                 if (name_type == 0 && name_len > 0) {
                     size_t n = name_len < outsz ? name_len : outsz - 1;
+                    /* 验证 SNI 名称只包含可打印 ASCII 字符，避免栈垃圾导致乱码 */
+                    int valid = 1;
+                    for (size_t i = 0; i < n; i++) {
+                        unsigned char c = buf[q + i];
+                        if (c < 0x20 || c > 0x7e) { valid = 0; break; }
+                    }
+                    if (!valid) break;
                     memcpy(out, buf + q, n);
                     out[n] = '\0';
                     return out[0] != '\0';
@@ -3063,8 +3072,15 @@ static void *connection_thread(void *arg) {
     size_t client_hello_len = 0;
     char sni_host[MAX_DOMAIN_LEN] = {0};
     if (is_tls) {
+        memset(client_hello, 0, sizeof(client_hello));
         client_hello_len = read_tls_client_hello(client, first, client_hello, sizeof(client_hello), cc->delay_ms);
-        parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
+        /* 只解析完整的 ClientHello，避免栈垃圾导致 SNI 乱码 */
+        if (client_hello_len >= 9 && client_hello[0] == 0x16 && client_hello[5] == 0x01) {
+            size_t hs_len = ((size_t)client_hello[6] << 16) | ((size_t)client_hello[7] << 8) | client_hello[8];
+            if (client_hello_len >= 9 + hs_len) {
+                parse_tls_sni(client_hello, client_hello_len, sni_host, sizeof(sni_host));
+            }
+        }
     }
     conn_msg("#%llu %s 识别客户端协议: %s，转发到 IP: %s 端口: %d%s%s",
              cc->conn_id, cc->client_addr[0] ? cc->client_addr : "unknown",
