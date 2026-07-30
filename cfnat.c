@@ -1531,15 +1531,20 @@ static int recv_more_timeout(socket_t fd, unsigned char *buf, size_t *used, size
 }
 
 static size_t read_tls_client_hello(socket_t client, unsigned char first, unsigned char *buf, size_t cap, int timeout_ms) {
+    (void)timeout_ms;
     if (!buf || cap < 5 || first != 0x16) return 0;
     size_t used = 1;
     buf[0] = first;
-    int wait_ms = timeout_ms > 0 && timeout_ms < 1500 ? timeout_ms : 1500;
+    /* TLS ClientHello 读取使用固定 3 秒超时，不受 delay_ms 限制 */
+    int wait_ms = 3000;
     if (!recv_more_timeout(client, buf, &used, 5, cap, wait_ms)) return used;
     size_t record_len = ((size_t)buf[3] << 8) | buf[4];
     size_t need = 5 + record_len;
     if (need > cap) need = cap;
-    recv_more_timeout(client, buf, &used, need, cap, wait_ms);
+    if (used < need) {
+        /* 首次未读够，额外等待 2 秒应对 TCP 分片延迟到达 */
+        recv_more_timeout(client, buf, &used, need, cap, 2000);
+    }
     return used;
 }
 
