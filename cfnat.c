@@ -1,4 +1,4 @@
-#define CFNAT_VERSION "0.0.13"
+#define CFNAT_VERSION "0.0.14"
 
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
@@ -1586,6 +1586,8 @@ static int parse_tls_sni(const unsigned char *buf, size_t len, char *out, size_t
                 if (q + name_len > list_end) break;
                 if (name_type == 0 && name_len > 0) {
                     size_t n = name_len < outsz ? name_len : outsz - 1;
+                    /* 边界保护: 确保不读取超出 buf 实际长度 len 的数据 */
+                    if (q + n > len) n = (len > q) ? len - q : 0;
                     /* 过滤非法字符: 仅复制合法域名字符, 跳过噪声字节 */
                     size_t o = 0;
                     for (size_t i = 0; i < n && o < outsz - 1; i++) {
@@ -3787,6 +3789,7 @@ static void install_signals(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);
 #endif
 }
 
